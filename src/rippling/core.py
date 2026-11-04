@@ -231,7 +231,13 @@ def entries_on(c: Client, day: date, tz: str) -> list[dict]:
     if not sid:
         return []
     events = c.twirp("ListTimeEntryEvents", {"summary_id": sid}).get("events", [])
-    return [e for e in events if local_date(e["event_times"]["start_time"], tz) == day]
+    return [
+        e
+        for e in events
+        # The event list can also carry leave/holiday/shift events; only time entries count.
+        if e.get("time_entry_event_details")
+        and local_date(e["event_times"]["start_time"], tz) == day
+    ]
 
 
 def manual_break_type(c: Client) -> BreakType:

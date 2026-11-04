@@ -41,7 +41,8 @@ submission yet; check the result in the web app after your first writes.
 and ask before sending. Without a terminal (scripts, agents) they stop after the dry-run;
 pass `--yes` to send.
 
-- `hours` sets one day: it creates the entry or replaces that day's existing one.
+- `hours` sets one day: it creates the entry or replaces that day's existing one completely
+  (times and breaks). It can't delete entries, and it refuses to replace entries with job codes.
 - `vacation` uses the Annual Leave Policy, end date inclusive, and runs Rippling's own
   validation first. Sending notifies your approver.
 

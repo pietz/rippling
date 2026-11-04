@@ -103,3 +103,42 @@ def test_refuses_to_replace_entry_with_job_codes(fake, monkeypatch):
     result = CliRunner().invoke(cli.app, [*HOURS, "--yes"])
     assert result.exit_code == 1 and "job codes" in result.output
     assert fake.sent == []
+
+
+def _entry(eid, **extra):
+    return {
+        "id": eid,
+        "event_times": {
+            "start_time": "2026-11-04T08:00:00Z",
+            "end_time": "2026-11-04T17:00:00Z",
+        },
+        "time_entry_event_details": {"job_shifts": [{}]},
+        **extra,
+    }
+
+
+def test_replaces_the_single_existing_entry(fake, monkeypatch):
+    monkeypatch.setattr(rp, "entries_on", lambda c, d, tz: [_entry("e1")])
+    result = CliRunner().invoke(cli.app, [*HOURS, "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "Replace time entry" in result.output
+    assert fake.sent[0][1]["object_id"] == "e1"
+
+
+@pytest.mark.parametrize(
+    "entries, message",
+    [
+        ([_entry("e1"), _entry("e2")], "already has 2 entries"),
+        ([_entry("e1", can_mutate=False)], "not editable"),
+    ],
+)
+def test_refuses_ambiguous_or_locked_days(fake, monkeypatch, entries, message):
+    monkeypatch.setattr(rp, "entries_on", lambda c, d, tz: entries)
+    result = CliRunner().invoke(cli.app, [*HOURS, "--yes"])
+    assert result.exit_code == 1 and message in result.output
+    assert fake.sent == []
+
+
+def test_version():
+    result = CliRunner().invoke(cli.app, ["--version"])
+    assert result.exit_code == 0 and result.output.startswith("rippling ")

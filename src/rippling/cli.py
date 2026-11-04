@@ -9,13 +9,12 @@ from typing import Annotated
 
 import typer
 
-from . import auth
+from . import __version__, auth
 from . import core as rp
 from .api import BASE, ApiError, Client, TransportError
 from .login import LoginError, wait_for_login
 
 app = typer.Typer(
-    help="Log hours and vacation in Rippling and check your balance, via Rippling's web API.",
     no_args_is_help=True,
     add_completion=False,
     pretty_exceptions_enable=False,
@@ -27,6 +26,30 @@ YES = Annotated[
         "--yes", "-y", help="Send without asking. Writes are dry-run otherwise."
     ),
 ]
+
+
+def _version(value: bool) -> None:
+    if value:
+        typer.echo(f"rippling {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version,
+            is_eager=True,
+            help="Show the version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """Unofficial CLI for Rippling: log hours, breaks and vacation, check your balance.
+
+    Writes (hours, vacation) are dry-run by default: they print exactly what they would send and ask before sending.
+    """
 
 
 def _err(msg: str) -> None:
@@ -62,7 +85,10 @@ def _send_or_dry_run(method: str, path: str, body: dict, yes: bool) -> bool:
     if yes:
         return True
     if not sys.stdin.isatty():
-        typer.echo("Dry run: nothing sent. Re-run with --yes to send.")
+        typer.echo(
+            "Dry run: nothing sent. To send it, re-run with --yes "
+            "(agents: only after the user explicitly approves)."
+        )
         return False
     if typer.confirm("Send this to Rippling?", default=False):
         return True
@@ -203,7 +229,7 @@ def hours(
 
 @app.command()
 def vacation(
-    start: Annotated[str, typer.Argument(help="First day off, YYYY-MM-DD.")],
+    start: Annotated[str, typer.Argument(help="First day off, YYYY-MM-DD or 'today'.")],
     end: Annotated[str, typer.Argument(help="Last day off (inclusive), YYYY-MM-DD.")],
     reason: Annotated[
         str | None, typer.Option(help="Optional note for your approver.")
