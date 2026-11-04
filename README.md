@@ -9,9 +9,8 @@ breaks and vacation and check your vacation balance from the terminal.
 uv tool install rippling
 ```
 
-`rippling login` also needs [agent-browser](https://github.com/vercel-labs/agent-browser)
-(`npm i -g agent-browser`). It uses [Helium](https://helium.computer) when installed and
-otherwise agent-browser's own Chrome; set `RIPPLING_BROWSER` to a browser executable to choose.
+`rippling login` opens Rippling in a Chromium-based browser you already have (Chrome, Edge,
+Brave, Chromium or Helium). Set `RIPPLING_BROWSER` to a browser executable to pick one.
 
 ## Use
 
@@ -37,8 +36,9 @@ pass `--yes` to send.
 
 ## How auth works
 
-There is no public API key for employees. `rippling login` opens a browser with a dedicated
-profile, you log in normally, and the CLI copies the session token from the web app into
+There is no public API key for employees. `rippling login` opens your browser with a separate
+profile just for this tool, you log in normally, and the CLI reads the session token from the
+web app over the browser's local DevTools port and stores it in
 `~/.config/rippling/credentials.json` (mode 0600; override the folder with
 `RIPPLING_CONFIG_DIR`). The token lasts about 30 days. The browser profile keeps your session,
 so later logins are usually instant.
