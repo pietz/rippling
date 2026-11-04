@@ -4,15 +4,9 @@ Unofficial command-line client for [Rippling](https://www.rippling.com): log wor
 breaks and vacation and check your vacation balance from the terminal.
 
 > [!WARNING]
-> **Unofficial. Use at your own risk.** This project is not affiliated with, endorsed by or
-> supported by People Center, Inc. (Rippling). "Rippling" is a trademark of People Center, Inc.,
-> used here only to describe what the tool works with.
->
-> It talks to the undocumented web API that the Rippling web app uses, with your own login.
-> **Using it may violate Rippling's terms of service and your employer's policies**, and may get
-> your access suspended. That API can change or break at any time. Check with your employer
-> before using it. You alone are responsible for your use of this tool and for every time or
-> leave entry it sends. Provided "as is", without warranty of any kind (see [LICENSE](LICENSE)).
+> Unofficial and not affiliated with Rippling. It uses Rippling's undocumented web API, which
+> may break at any time, and using it may violate Rippling's terms or your employer's
+> policies. Use at your own risk.
 
 ## Install
 
