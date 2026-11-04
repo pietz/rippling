@@ -306,11 +306,17 @@ def entry_view(e: dict, tz: str) -> dict:
     }
 
 
-def describe_entry(e: dict, tz: str) -> str:
-    v = entry_view(e, tz)
+def span_text(v: dict) -> str:
+    """'09:00-18:00, break 12:00-13:00' for an entry_view dict."""
     out = f"{v['start']}-{v['end'] or 'open'}"
     if v["breaks"]:
         out += ", break " + ", ".join(f"{b['start']}-{b['end']}" for b in v["breaks"])
+    return out
+
+
+def describe_entry(e: dict, tz: str) -> str:
+    v = entry_view(e, tz)
+    out = span_text(v)
     if v["worked_hours"] is not None:
         out += f", {v['worked_hours']:g} h worked"
     return out + (f" [{v['status']}]" if v["status"] else "")
@@ -520,7 +526,7 @@ def leave_view(r: dict) -> dict:
         "end": r["endDate"],
         "days": float(r.get("numDays") or 0),
         "policy": (r.get("policyDisplayName") or "").strip(),
-        "status": r.get("status"),
+        "status": (r.get("status") or "").lower() or None,
         "reason": r.get("reasonForLeave") or None,
     }
 
@@ -567,10 +573,13 @@ def forecast_days(c: Client, policy_id: str, balance: dict, on: date) -> float |
             "leavePolicy": policy_id,
             "date": us,
             "endDate": us,
-            "currentBalanceInMins": balance["balanceInMins"],
-            "currentBalanceInDays": balance["balanceInDays"],
+            "currentBalanceInMins": balance.get("balanceInMins"),
+            "currentBalanceInDays": balance.get("balanceInDays"),
         },
     )
     if not isinstance(res, dict) or not res.get("forecastAvailable"):
         return None
-    return float(res["balanceDays"])
+    try:
+        return float(res["balanceDays"])
+    except (KeyError, TypeError, ValueError):
+        return None

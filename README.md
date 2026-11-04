@@ -27,7 +27,7 @@ rippling leave request 2026-12-21 2026-12-23 --reason "Winter break"
 rippling leave list
 rippling leave cancel 1a2b3c
 
-rippling holidays --year 2027
+rippling holidays 2027
 rippling people search engineering
 rippling whoami
 ```

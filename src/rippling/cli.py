@@ -173,7 +173,7 @@ def whoami(as_json: JSON = False) -> None:
 @app.command()
 def holidays(
     year: Annotated[
-        int | None, typer.Option(help="Year to show. Default: this year.")
+        int | None, typer.Argument(help="Year (YYYY). Default: this year.")
     ] = None,
     as_json: JSON = False,
 ) -> None:
@@ -261,13 +261,6 @@ def hours_log(
         )
 
 
-def _entry_text(v: dict) -> str:
-    out = f"{v['start']}-{v['end'] or 'open'}"
-    if v["breaks"]:
-        out += ", break " + ", ".join(f"{b['start']}-{b['end']}" for b in v["breaks"])
-    return out
-
-
 def _show_timesheet(
     title: str, days: list[rp.Day], tz: str, as_json: bool, skip_empty: bool
 ) -> None:
@@ -300,17 +293,17 @@ def _show_timesheet(
         return
     typer.echo(f"{title} ({tz})")
     for d in days:
-        label = f"{d.date:%a %d.%m.}"
+        label = f"{d.date:%a %Y-%m-%d}"
         notes = [n for n in (d.holiday, d.leave) if n]
         if not d.entries and not notes and not d.missing(today):
-            if not skip_empty or d.scheduled:
+            if not skip_empty or (d.scheduled and d.date <= today):
                 typer.echo(f"  {label}  -")
             continue
         for i, v in enumerate(d.entries):
             status = f"  {v['status']}" if v["status"] else ""
             hours = _hours(v["worked_hours"]) if v["worked_hours"] is not None else "?"
             typer.echo(
-                f"  {label if i == 0 else ' ' * len(label)}  {_entry_text(v):<30} {hours:>6}{status}"
+                f"  {label if i == 0 else ' ' * len(label)}  {rp.span_text(v):<30} {hours:>6}{status}"
             )
         if d.missing(today):
             typer.secho(
@@ -339,7 +332,7 @@ def hours_week(
     monday = d - timedelta(days=d.weekday())
     sunday = monday + timedelta(days=6)
     days = rp.timesheet(c, monday, sunday, tz)
-    _show_timesheet(f"Week {monday:%d.%m.}-{sunday:%d.%m.%Y}", days, tz, as_json, False)
+    _show_timesheet(f"Week {monday} to {sunday}", days, tz, as_json, False)
 
 
 @hours_app.command("month")
@@ -383,15 +376,20 @@ def leave_balance(
     """Show leave balances in days (policies with no balance or usage are hidden)."""
     c = _client()
     try:
-        on_date = rp.parse_date(on) if on else None
+        on_date = rp.parse_date(on, rp.today_in(rp.timezone(c))) if on else None
     except ValueError as e:
         _err(str(e))
-    fields = ("availableBalanceDays", "daysUsed", "daysPending", "daysScheduled")
+    fields = {
+        "available_days": "availableBalanceDays",
+        "used_days": "daysUsed",
+        "pending_days": "daysPending",
+        "scheduled_days": "daysScheduled",
+    }
     rows = [
         {
             "policy": p["policyDisplayName"].strip(),
             "policy_id": p["leavePolicyId"],
-            **{k: float(p.get(k) or 0) for k in fields},
+            **{k: float(p.get(src) or 0) for k, src in fields.items()},
         }
         for p in rp.pto_summary(c)
     ]
@@ -399,25 +397,25 @@ def leave_balance(
         balances = rp.current_balances(c)
         for r in rows:
             b = balances.get(r["policy_id"])
-            r["forecast"] = (
+            r["forecast_days"] = (
                 rp.forecast_days(c, r["policy_id"], b, on_date) if b else None
             )
-    rows = [r for r in rows if any(r[k] for k in fields) or r.get("forecast")]
+    rows = [r for r in rows if any(r[k] for k in fields) or r.get("forecast_days")]
     if as_json:
         _print_json([r | ({"forecast_date": on_date} if on_date else {}) for r in rows])
         return
     width = max([len(r["policy"]) for r in rows] + [6])
-    extra = f"  {'On ' + f'{on_date:%d.%m.%Y}':>13}" if on_date else ""
+    extra = f"  {'On ' + str(on_date):>13}" if on_date else ""
     typer.echo(
         f"{'Policy':<{width}}  {'Available':>9}  {'Used':>6}  {'Pending':>7}  {'Scheduled':>9}{extra}"
     )
     for r in rows:
         line = (
-            f"{r['policy']:<{width}}  {r['availableBalanceDays']:>9g}  {r['daysUsed']:>6g}"
-            f"  {r['daysPending']:>7g}  {r['daysScheduled']:>9g}"
+            f"{r['policy']:<{width}}  {r['available_days']:>9g}  {r['used_days']:>6g}"
+            f"  {r['pending_days']:>7g}  {r['scheduled_days']:>9g}"
         )
         if on_date:
-            projected = "-" if r["forecast"] is None else f"{r['forecast']:g}"
+            projected = "-" if r["forecast_days"] is None else f"{r['forecast_days']:g}"
             line += f"  {projected:>13}"
         typer.echo(line)
 
@@ -444,7 +442,7 @@ def leave_request(
 
     hol = rp.holidays(c)
     days = rp.working_days(d0, d1, rp.scheduled_hours(c, d0, d1), set(hol))
-    skipped = [f"{d:%a %d.%m.} {hol[d]}" for d in sorted(hol) if d0 <= d <= d1]
+    skipped = [f"{d:%a %Y-%m-%d} {hol[d]}" for d in sorted(hol) if d0 <= d <= d1]
     available = float(policy.get("availableBalanceDays") or 0)
     typer.echo(
         f"Vacation request {d0:%a %Y-%m-%d} to {d1:%a %Y-%m-%d} ({policy['policyDisplayName']})"
@@ -456,7 +454,7 @@ def leave_request(
         typer.secho("  This range has no working days.", fg="yellow")
     for r in rp.overlapping_leave(c, d0, d1):
         typer.secho(
-            f"  Overlaps existing request {r['startDate']} to {r['endDate']} ({r['status']}).",
+            f"  Overlaps existing request {r['startDate']} to {r['endDate']} ({r['status'].lower()}).",
             fg="yellow",
         )
     errors = rp.validate_leave(c, body)
@@ -533,10 +531,11 @@ def leave_cancel(
     path = rp.cancel_path(v["id"])
     if not _send_or_dry_run("POST", path, {}, yes):
         return
-    _post_write(c, path, {})
+    res = _post_write(c, path, {})
+    typer.echo(f"Sent. Rippling answered: {json.dumps(res, ensure_ascii=False)[:500]}")
     try:
         after = rp.find_leave(rp.leave_requests(c), v["id"])
-        typer.echo(f"Sent. Request {v['id']} is now {after.get('status')}.")
+        typer.echo(f"Status now: {after.get('status')}. Check the web app to be sure.")
     except (ApiError, TransportError, ValueError) as e:
         typer.secho(f"Sent, but reading it back failed ({e}).", fg="yellow")
 

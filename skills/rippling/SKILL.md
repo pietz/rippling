@@ -35,7 +35,7 @@ rippling hours week [DATE] [--json]            # Mon-Sun: entries, breaks, worke
 rippling hours month [YYYY-MM] [--json]
 rippling leave balance [--on YYYY-MM-DD] [--json]   # days; --on adds Rippling's projection
 rippling leave list [--all] [--json]           # requests with status and id
-rippling holidays [--year YYYY] [--json]
+rippling holidays [YYYY] [--json]
 rippling people search [QUERY] [--json]        # name/title/department/email words; manager, email
 rippling whoami [--json]
 ```

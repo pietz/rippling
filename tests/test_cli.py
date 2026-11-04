@@ -182,7 +182,7 @@ def test_leave_cancel_refuses_inactive(fake, monkeypatch):
         rp, "leave_requests", lambda c: [LEAVE | {"status": "CANCELED"}]
     )
     result = CliRunner().invoke(cli.app, ["leave", "cancel", "1a2b3c", "--yes"])
-    assert result.exit_code == 1 and "already CANCELED" in result.output
+    assert result.exit_code == 1 and "already canceled" in result.output
     assert fake.sent == []
 
 

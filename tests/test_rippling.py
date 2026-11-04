@@ -292,3 +292,28 @@ LEAVE_HALF = {
 )
 def test_leave_hours_on(req, day, expected):
     assert rp.leave_hours_on(req, day, 8.0) == expected
+
+
+class ForecastClient:
+    creds = type("C", (), {"role_id": "r"})()
+
+    def __init__(self, res):
+        self.res = res
+
+    def post(self, path, body):
+        return self.res
+
+
+@pytest.mark.parametrize(
+    "res, expected",
+    [
+        ({"forecastAvailable": True, "balanceDays": "22.00"}, 22.0),
+        ({"forecastAvailable": True, "balanceDays": None}, None),
+        ({"forecastAvailable": True}, None),
+        ({"forecastAvailable": False, "balanceDays": "5"}, None),
+        (None, None),
+    ],
+)
+def test_forecast_days_tolerates_partial_answers(res, expected):
+    got = rp.forecast_days(ForecastClient(res), "p", {}, date(2027, 4, 1))
+    assert got == expected
