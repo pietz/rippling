@@ -17,13 +17,15 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 from curl_cffi import CurlError
 from curl_cffi.requests import WebSocket
 
 from .auth import Credentials, config_dir
 
-APP_URL = "https://app.rippling.com/"
+APP_HOST = "app.rippling.com"
+APP_URL = f"https://{APP_HOST}/"
 
 READ_STORAGE_JS = """JSON.stringify({
   path: location.pathname,
@@ -158,12 +160,12 @@ class Browser:
             ws.close()
 
     def evaluate_on(self, host: str, expression: str) -> object:
-        """Evaluate JS in the first open tab on `host`; None if there's none."""
+        """Evaluate JS in the first open tab whose host is exactly `host`; None if none."""
         url = f"http://127.0.0.1:{self.port}/json/list"
         with urllib.request.urlopen(url, timeout=5) as r:
             targets = json.load(r)
         for t in targets:
-            if t.get("type") == "page" and host in t.get("url", ""):
+            if t.get("type") == "page" and urlparse(t.get("url", "")).hostname == host:
                 msg = self._cdp(
                     t["webSocketDebuggerUrl"],
                     "Runtime.evaluate",
@@ -173,17 +175,22 @@ class Browser:
         return None
 
     def close(self) -> None:
-        if not self.running:
+        """Close the browser and reap the process. Never raises."""
+        if self.proc is None or self.proc.poll() is not None:
             return
         try:
             self._cdp(f"ws://127.0.0.1:{self.port}{self.browser_ws}", "Browser.close")
             self.proc.wait(timeout=10)
-        except CDP_ERRORS:
-            self.proc.terminate()
+            return
+        except (*CDP_ERRORS, subprocess.TimeoutExpired):
+            pass
+        for stop in (self.proc.terminate, self.proc.kill):
             try:
+                stop()
                 self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+                return
+            except (OSError, subprocess.TimeoutExpired):
+                continue
 
 
 def _credentials(raw: object) -> Credentials | None:
@@ -218,9 +225,7 @@ def wait_for_login(
             if not browser.running:
                 raise LoginError("The browser was closed before the login finished.")
             try:
-                creds = _credentials(
-                    browser.evaluate_on("rippling.com", READ_STORAGE_JS)
-                )
+                creds = _credentials(browser.evaluate_on(APP_HOST, READ_STORAGE_JS))
             except CDP_ERRORS:
                 creds = None  # page mid-navigation or tab not ready; keep waiting
             if creds and verify(creds):

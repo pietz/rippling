@@ -1,7 +1,7 @@
 """The write commands must never send without --yes (or an interactive yes)."""
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from typer.testing import CliRunner
@@ -51,7 +51,16 @@ def fake(monkeypatch):
         ],
     )
     monkeypatch.setattr(rp, "holidays", lambda c: {date(2026, 12, 24): "Christmas Eve"})
-    monkeypatch.setattr(rp, "schedule_hours", lambda c, d: [8, 8, 8, 8, 8, 0, 0])
+    monkeypatch.setattr(
+        rp,
+        "scheduled_hours",
+        lambda c, a, b: {
+            a + timedelta(days=i): (
+                8.0 if (a + timedelta(days=i)).weekday() < 5 else 0.0
+            )
+            for i in range((b - a).days + 1)
+        },
+    )
     monkeypatch.setattr(rp, "overlapping_leave", lambda c, a, b: [])
     return client
 

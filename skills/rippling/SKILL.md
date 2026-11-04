@@ -14,7 +14,8 @@ self-documenting: `rippling --help` and `rippling <command> --help`. Install wit
 ## Writes need the user's yes. No exceptions.
 
 `hours log`, `leave request` and `leave cancel` are **dry-run by default**: they print a summary plus the exact JSON
-they would send, then stop ("Dry run: nothing sent"). To send:
+they would send. Run from an agent (no terminal on stdin) they then stop ("Dry run: nothing
+sent"); in a terminal they ask the user instead. To send:
 
 1. Run the command without `--yes`.
 2. Show the user the summary lines (date, times, breaks, working days, warnings).

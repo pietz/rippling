@@ -1,4 +1,4 @@
-from datetime import date, time
+from datetime import date, time, timedelta
 
 import pytest
 
@@ -155,14 +155,20 @@ def test_worked_minutes_unpaid_vs_paid_break():
 
 
 def test_working_days_skips_weekends_and_holidays():
-    schedule = [8, 8, 8, 8, 8, 0, 0]
+    start, end = date(2026, 12, 21), date(2027, 1, 1)
+    schedule = {
+        start + timedelta(days=i): (
+            8.0 if (start + timedelta(days=i)).weekday() < 5 else 0.0
+        )
+        for i in range(12)
+    }
     holidays = {
         date(2026, 12, 24),
         date(2026, 12, 25),
         date(2026, 12, 31),
         date(2027, 1, 1),
     }
-    days = rp.working_days(date(2026, 12, 21), date(2027, 1, 1), schedule, holidays)
+    days = rp.working_days(start, end, schedule, holidays)
     assert days == [
         date(2026, 12, 21),
         date(2026, 12, 22),
@@ -228,9 +234,61 @@ def test_entry_view_computes_worked_hours_when_missing():
     assert v["breaks"] == [{"start": "12:00", "end": "13:00"}]
 
 
-def test_schedule_is_reordered_to_monday_first():
-    # Live shapes: anchor Thu 2026-10-01 and Sun 2026-11-08 for a Mon-Fri 8h schedule.
-    mon_fri = [8.0, 8.0, 8.0, 8.0, 8.0, 0.0, 0.0]
-    assert rp.monday_first(date(2026, 10, 1), [8, 8, 0, 0, 8, 8, 8]) == mon_fri
-    assert rp.monday_first(date(2026, 11, 8), [0, 8, 8, 8, 8, 8, 0]) == mon_fri
-    assert rp.monday_first(date(2026, 11, 2), mon_fri) == mon_fri
+class ScheduleClient:
+    """Answers get_working_schedule like Rippling: the 7 days starting at the anchor."""
+
+    def __init__(self, hours_for):
+        self.hours_for, self.anchors = hours_for, []
+        self.creds = type("C", (), {"role_id": "r"})()
+
+    def post(self, path, body):
+        m, d, y = map(int, body["anchorDate"].split("/"))
+        anchor = date(y, m, d)
+        self.anchors.append(anchor)
+        return [str(self.hours_for(anchor + timedelta(days=i))) for i in range(7)]
+
+
+def test_scheduled_hours_maps_anchor_relative_weeks_to_dates():
+    # Mon-Fri 8 h until 2026-10-18, then Mon-Thu 6 h: the change must show mid-month.
+    def hours_for(d):
+        if d.weekday() >= 5 or (d >= date(2026, 10, 19) and d.weekday() == 4):
+            return 0
+        return 8 if d < date(2026, 10, 19) else 6
+
+    c = ScheduleClient(hours_for)
+    got = rp.scheduled_hours(
+        c, date(2026, 10, 1), date(2026, 10, 31)
+    )  # starts on a Thursday
+    assert len(got) == 31 and c.anchors[0] == date(2026, 10, 1) and len(c.anchors) == 5
+    assert got[date(2026, 10, 1)] == 8 and got[date(2026, 10, 3)] == 0
+    assert got[date(2026, 10, 20)] == 6 and got[date(2026, 10, 23)] == 0
+    assert all(d.month == 10 for d in got)
+
+
+LEAVE_HALF = {
+    "startDate": "2026-05-19",
+    "endDate": "2026-05-19",
+    "startDateCustomHours": "4.00",
+    "endDateCustomHours": "0.00",
+}
+
+
+@pytest.mark.parametrize(
+    "req, day, expected",
+    [
+        (LEAVE_HALF, date(2026, 5, 19), 4.0),  # custom hours on a single day
+        (LEAVE_HALF, date(2026, 5, 20), 0.0),  # outside the request
+        ({"startDate": "2026-05-18", "endDate": "2026-05-20"}, date(2026, 5, 19), 8.0),
+        (
+            {
+                "startDate": "2026-05-18",
+                "endDate": "2026-05-20",
+                "endDateHalfDay": True,
+            },
+            date(2026, 5, 20),
+            4.0,
+        ),
+    ],
+)
+def test_leave_hours_on(req, day, expected):
+    assert rp.leave_hours_on(req, day, 8.0) == expected

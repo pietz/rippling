@@ -212,13 +212,6 @@ def pay_periods(c: Client) -> list[tuple[date, date]]:
     return [(date.fromisoformat(a), date.fromisoformat(b)) for a, b in data["periods"]]
 
 
-def pay_period_start(c: Client, day: date) -> date | None:
-    for start, end in pay_periods(c):
-        if start <= day <= end:
-            return start
-    return None
-
-
 def summary_id(c: Client, period_start: date) -> str | None:
     data = c.get(
         "/time_tracking/api/time_entry_period_summaries_cached/getAllIdsAndPageSize/",
@@ -339,34 +332,41 @@ class Day:
         return self.scheduled > 0 and not self.entries and self.date < today
 
 
+def leave_hours_on(r: dict, d: date, scheduled: float) -> float:
+    """Hours of leave request `r` that fall on day `d` (partial days use custom hours)."""
+    first, last = date.fromisoformat(r["startDate"]), date.fromisoformat(r["endDate"])
+    if not first <= d <= last:
+        return 0.0
+    for edge, prefix in ((first, "startDate"), (last, "endDate")):
+        if d == edge:
+            custom = float(r.get(f"{prefix}CustomHours") or 0)
+            if custom > 0:
+                return min(custom, scheduled)
+            if r.get(f"{prefix}HalfDay"):
+                return scheduled / 2
+    return scheduled
+
+
 def timesheet(c: Client, start: date, end: date, tz: str) -> list[Day]:
     """One row per day in [start, end]: entries, expected hours, holiday, leave."""
     entries = [entry_view(e, tz) for e in time_entries(c, start, end, tz)]
-    schedule = schedule_hours(c, start)
+    schedule = scheduled_hours(c, start, end)
     hol = holidays(c)
-    leaves = [
-        r
-        for r in leave_requests(c)
-        if r.get("status") not in INACTIVE_LEAVE
-        and date.fromisoformat(r["startDate"]) <= end
-        and date.fromisoformat(r["endDate"]) >= start
-    ]
+    leaves = overlapping_leave(c, start, end)
     days, d = [], start
     while d <= end:
-        leave = next(
-            (
-                f"{r['policyDisplayName'].strip()} ({r['status'].lower()})"
-                for r in leaves
-                if date.fromisoformat(r["startDate"])
-                <= d
-                <= date.fromisoformat(r["endDate"])
-            ),
-            None,
-        )
         holiday = hol.get(d)
-        scheduled = 0.0 if (holiday or leave) else schedule[d.weekday()]
+        scheduled = 0.0 if holiday else schedule.get(d, 0.0)
+        leave, off = None, 0.0
+        for r in leaves:
+            if hours := leave_hours_on(r, d, scheduled):
+                off += hours
+                partial = f" {hours:g} h" if hours < scheduled else ""
+                leave = (
+                    f"{r['policyDisplayName'].strip()}{partial} ({r['status'].lower()})"
+                )
         todays = [e for e in entries if e["date"] == d.isoformat()]
-        days.append(Day(d, todays, scheduled, holiday, leave))
+        days.append(Day(d, todays, max(0.0, scheduled - off), holiday, leave))
         d += timedelta(days=1)
     return days
 
@@ -418,35 +418,38 @@ def build_leave_request(
 
 
 def working_days(
-    start: date, end: date, schedule_hours: list[float], holidays: set[date]
+    start: date, end: date, schedule: dict[date, float], holidays: set[date]
 ) -> list[date]:
-    """Days in [start, end] with scheduled hours (schedule is Monday-first) that aren't holidays."""
+    """Days in [start, end] with scheduled hours that aren't holidays."""
     days, d = [], start
     while d <= end:
-        if schedule_hours[d.weekday()] > 0 and d not in holidays:
+        if schedule.get(d, 0) > 0 and d not in holidays:
             days.append(d)
         d += timedelta(days=1)
     return days
 
 
-def schedule_hours(c: Client, anchor: date) -> list[float]:
-    """Scheduled hours per weekday, Monday first, for the week around `anchor`."""
-    data = c.post(
-        "/pto/api/get_working_schedule/",
-        {
-            "roleId": c.creds.role_id,
-            "allow_time_admin": False,
-            "anchorDate": anchor.strftime("%m/%d/%Y"),
-        },
-    )
-    return monday_first(anchor, [float(h) for h in data])
+def scheduled_hours(c: Client, start: date, end: date) -> dict[date, float]:
+    """Scheduled working hours per date in [start, end].
 
-
-def monday_first(anchor: date, hours: list[float]) -> list[float]:
-    """Rippling returns the 7 days starting at the anchor date; reorder to Mon..Sun."""
-    out = [0.0] * 7
-    for i, h in enumerate(hours[:7]):
-        out[(anchor.weekday() + i) % 7] = h
+    Rippling answers with the 7 days starting at the anchor date, so this walks the
+    range one week at a time (schedules can change from week to week).
+    """
+    out: dict[date, float] = {}
+    anchor = start
+    while anchor <= end:
+        data = c.post(
+            "/pto/api/get_working_schedule/",
+            {
+                "roleId": c.creds.role_id,
+                "allow_time_admin": False,
+                "anchorDate": anchor.strftime("%m/%d/%Y"),
+            },
+        )
+        for i, h in enumerate(data[:7]):
+            if (d := anchor + timedelta(days=i)) <= end:
+                out[d] = float(h)
+        anchor += timedelta(days=7)
     return out
 
 

@@ -179,7 +179,7 @@ def holidays(
 ) -> None:
     """List your company's public holidays."""
     c = _client()
-    year = year or date.today().year
+    year = year or rp.today_in(rp.timezone(c)).year
     days = sorted((d, name) for d, name in rp.holidays(c).items() if d.year == year)
     if as_json:
         _print_json([{"date": d.isoformat(), "name": n} for d, n in days])
@@ -395,7 +395,6 @@ def leave_balance(
         }
         for p in rp.pto_summary(c)
     ]
-    rows = [r for r in rows if any(r[k] for k in fields)]
     if on_date:
         balances = rp.current_balances(c)
         for r in rows:
@@ -403,6 +402,7 @@ def leave_balance(
             r["forecast"] = (
                 rp.forecast_days(c, r["policy_id"], b, on_date) if b else None
             )
+    rows = [r for r in rows if any(r[k] for k in fields) or r.get("forecast")]
     if as_json:
         _print_json([r | ({"forecast_date": on_date} if on_date else {}) for r in rows])
         return
@@ -443,7 +443,7 @@ def leave_request(
         _err(str(e))
 
     hol = rp.holidays(c)
-    days = rp.working_days(d0, d1, rp.schedule_hours(c, d0), set(hol))
+    days = rp.working_days(d0, d1, rp.scheduled_hours(c, d0, d1), set(hol))
     skipped = [f"{d:%a %d.%m.} {hol[d]}" for d in sorted(hol) if d0 <= d <= d1]
     available = float(policy.get("availableBalanceDays") or 0)
     typer.echo(
@@ -484,7 +484,7 @@ def leave_list(
 ) -> None:
     """List your leave requests, newest first (this year and later by default)."""
     c = _client()
-    since = date(date.today().year, 1, 1)
+    since = date(rp.today_in(rp.timezone(c)).year, 1, 1)
     rows = [rp.leave_view(r) for r in rp.leave_requests(c)]
     if not show_all:
         rows = [r for r in rows if date.fromisoformat(r["end"]) >= since]
