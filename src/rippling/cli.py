@@ -145,7 +145,7 @@ def login(
             verify,
             timeout=timeout,
             on_wait=lambda: typer.echo(
-                "Log in there (password, Cloudflare check, 2FA). Waiting..."
+                "Log in there as usual (password, browser check, 2FA). Waiting..."
             ),
         )
     except LoginError as e:

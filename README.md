@@ -53,8 +53,9 @@ There is no public API key for employees. `rippling login` opens your browser wi
 profile just for this tool, you log in normally, and the CLI reads the session token from the
 web app over the browser's local DevTools port and stores it in
 `~/.config/rippling/credentials.json` (mode 0600; override the folder with
-`RIPPLING_CONFIG_DIR`). The token lasts about 30 days. The browser profile keeps your session,
-so later logins are usually instant.
+`RIPPLING_CONFIG_DIR`). The token lasts about 30 days. The browser profile (in the same folder) keeps your session,
+so later logins are usually instant. Both are stored unencrypted, protected only by your user
+account; delete `~/.config/rippling` to log out locally.
 
 ## Agent skill
 
@@ -76,5 +77,7 @@ MIT. See [LICENSE](LICENSE).
 ## Disclaimer
 
 Unofficial and not affiliated with Rippling. It uses Rippling's undocumented web API, which
-may break at any time, and using it may violate Rippling's terms or your employer's policies.
-Use at your own risk.
+may break at any time. Using it likely conflicts with Rippling's terms of use and may conflict
+with your employer's agreement with Rippling and its IT policies: **get your employer's written
+approval before using it**, and only use it for your own account. Time and leave records
+matter for payroll; you are responsible for every entry you send. Use at your own risk.

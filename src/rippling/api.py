@@ -28,7 +28,7 @@ class TransportError(Exception):
 class Client:
     def __init__(self, creds: Credentials):
         self.creds = creds
-        # Requests mirror the web app: Chrome's TLS fingerprint plus its context headers.
+        # Same client profile and headers as the Rippling web app in Chrome.
         self.session = requests.Session(impersonate="chrome")
         self.session.headers.update(
             {

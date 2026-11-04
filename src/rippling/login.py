@@ -2,8 +2,8 @@
 
 Starts an installed Chromium-family browser (Chrome, Edge, Brave, Chromium, Helium)
 with a dedicated profile and a local DevTools port, then reads localStorage over the
-DevTools protocol. No automation framework is involved: it is a normal browser
-window, so Rippling's login, Cloudflare check and 2FA work as usual. The profile
+DevTools protocol. It is a normal browser window: the user logs in exactly as on
+the website (password, browser check, 2FA). The profile
 persists, so later logins usually need no typing.
 """
 
@@ -114,8 +114,7 @@ class Browser:
                 self.executable,
                 f"--user-data-dir={self.profile}",
                 "--remote-debugging-port=0",  # the browser picks a free port
-                # A debugging port otherwise flags the page as automated, which
-                # Cloudflare's check rejects.
+                # Behave like a regular browser window while the debugging port is open.
                 "--disable-blink-features=AutomationControlled",
                 # Profile-local cookie encryption: no OS keychain prompt, and the
                 # profile stays readable no matter which browser opens it.
