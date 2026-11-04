@@ -207,3 +207,21 @@ def test_hours_week_json(fake, monkeypatch):
     assert data["worked_hours"] == 8.0 and data["scheduled_hours"] == 40.0
     missing = [d["date"] for d in data["days"] if d["missing"]]
     assert missing == ["2026-11-03"]  # past workday without entry; 04.11. is today
+
+
+def test_logout_removes_local_login():
+    from rippling import auth
+
+    auth.save(
+        Credentials(access_token="t", company_id="c", role_id="r", expires_at=9e9)
+    )
+    out = CliRunner().invoke(cli.app, ["logout"])
+    assert out.exit_code == 0 and "Removed" in out.output
+    out = CliRunner().invoke(cli.app, ["logout"])
+    assert "Nothing to remove" in out.output
+
+
+def test_people_search_needs_a_query(fake):
+    assert CliRunner().invoke(cli.app, ["people", "search"]).exit_code != 0
+    out = CliRunner().invoke(cli.app, ["people", "search", "  "])
+    assert out.exit_code != 0 and "at least one word" in out.output

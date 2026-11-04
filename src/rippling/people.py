@@ -15,6 +15,18 @@ ORG_CHART_BODY = {
 }
 
 
+# What `people search` shows about colleagues; `whoami` shows all of `person_view`.
+COLLEAGUE_FIELDS = (
+    "id",
+    "name",
+    "title",
+    "department",
+    "manager",
+    "manager_id",
+    "email",
+)
+
+
 def person_view(row: dict) -> dict:
     who = row.get("RoleWithCompany:id") or {}
     manager = row.get("RoleWithCompany:manager") or {}
@@ -43,14 +55,23 @@ def directory(c: Client) -> list[dict]:
 
 
 def search(people: list[dict], query: str) -> list[dict]:
-    """People matching every word of `query` in name, title, department or email."""
+    """Colleagues matching every word of `query` in name, title, department or email.
+
+    Returns only COLLEAGUE_FIELDS. An empty query matches nobody: no directory dumps.
+    """
     words = query.lower().split()
+    if not words:
+        return []
     fields = ("name", "title", "department", "email")
 
     def text(p: dict) -> str:
         return " ".join(str(p[f] or "") for f in fields).lower()
 
-    return [p for p in people if all(w in text(p) for w in words)]
+    return [
+        {f: p[f] for f in COLLEAGUE_FIELDS}
+        for p in people
+        if all(w in text(p) for w in words)
+    ]
 
 
 def find(people: list[dict], role_id: str) -> dict | None:

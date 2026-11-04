@@ -30,6 +30,7 @@ rippling leave cancel 1a2b3c
 rippling holidays 2027
 rippling people search engineering
 rippling whoami
+rippling logout                                  # delete the local token and browser profile
 ```
 
 Every command explains itself with `--help`. Read commands take `--json` for scripts and agents.
@@ -55,7 +56,8 @@ web app over the browser's local DevTools port and stores it in
 `~/.config/rippling/credentials.json` (mode 0600; override the folder with
 `RIPPLING_CONFIG_DIR`). The token lasts about 30 days. The browser profile (in the same folder) keeps your session,
 so later logins are usually instant. Both are stored unencrypted, protected only by your user
-account; delete `~/.config/rippling` to log out locally.
+account; `rippling logout` deletes both. That doesn't revoke the token on Rippling's side; it
+stays valid until it expires.
 
 ## Agent skill
 

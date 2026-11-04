@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 from curl_cffi import CurlError
 from curl_cffi.requests import WebSocket
 
-from .auth import Credentials, config_dir
+from .auth import Credentials, profile_dir
 
 APP_HOST = "app.rippling.com"
 APP_URL = f"https://{APP_HOST}/"
@@ -214,7 +214,7 @@ def wait_for_login(
     verify, timeout: float = 600, poll: float = 2, on_wait=None
 ) -> Credentials:
     """Open Rippling in a browser and poll localStorage until `verify` accepts a token."""
-    browser = Browser(find_browser(), config_dir() / "browser-profile")
+    browser = Browser(find_browser(), profile_dir())
     started = time.monotonic()
     deadline = started + timeout
     announced = False

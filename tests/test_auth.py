@@ -24,3 +24,14 @@ def test_missing_and_expired_credentials_raise():
     auth.save(_creds(time.time() - 1))
     with pytest.raises(auth.AuthError, match="expired"):
         auth.load()
+
+
+def test_clear_removes_token_and_profile():
+    assert auth.clear() == []
+    auth.save(_creds(time.time() + 3600))
+    (auth.profile_dir() / "Default").mkdir(parents=True)
+    removed = auth.clear()
+    assert removed == [auth.credentials_path(), auth.profile_dir()]
+    assert not auth.credentials_path().exists() and not auth.profile_dir().exists()
+    with pytest.raises(auth.AuthError):
+        auth.load()

@@ -1,6 +1,6 @@
 """`rippling` command line.
 
-rippling login | whoami | holidays
+rippling login | logout | whoami | holidays
 rippling hours  log | week | month
 rippling leave  balance | request | list | cancel
 rippling people search
@@ -153,6 +153,20 @@ def login(
     path = auth.save(creds)
     expires = datetime.fromtimestamp(creds.expires_at).strftime("%Y-%m-%d")
     typer.echo(f"Logged in. Token saved to {path} (expires {expires}).")
+
+
+@app.command()
+def logout() -> None:
+    """Delete the stored token and the login browser profile from this computer.
+
+    The token itself stays valid on Rippling's side until it expires.
+    """
+    removed = auth.clear()
+    if not removed:
+        typer.echo("Nothing to remove: not logged in on this computer.")
+        return
+    for path in removed:
+        typer.echo(f"Removed {path}")
 
 
 @app.command()
@@ -550,8 +564,8 @@ def _print_person(p: dict) -> None:
         ("department", p["department"]),
         ("manager", p["manager"]),
         ("email", p["email"]),
-        ("location", ", ".join(x for x in (p["location"], p["country"]) if x) or None),
-        ("since", p["start_date"]),
+        ("location", ", ".join(x for x in (p.get("location"), p.get("country")) if x)),
+        ("since", p.get("start_date")),
     ]
     for k, v in rows:
         if v:
@@ -561,16 +575,16 @@ def _print_person(p: dict) -> None:
 @people_app.command("search")
 def people_search(
     query: Annotated[
-        str | None,
-        typer.Argument(
-            help="Words to match in name, title, department or email. Empty lists everyone."
-        ),
-    ] = None,
+        str,
+        typer.Argument(help="Words to match in name, title, department or email."),
+    ],
     as_json: JSON = False,
 ) -> None:
     """Find colleagues: title, department, manager and work email."""
+    if not query.split():
+        _err("Give at least one word to search for.")
     c = _client()
-    found = ppl.search(ppl.directory(c), query or "")
+    found = ppl.search(ppl.directory(c), query)
     if as_json:
         _print_json(found)
         return

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -32,6 +33,23 @@ def config_dir() -> Path:
 
 def credentials_path() -> Path:
     return config_dir() / "credentials.json"
+
+
+def profile_dir() -> Path:
+    """The browser profile `rippling login` uses; it keeps the web session."""
+    return config_dir() / "browser-profile"
+
+
+def clear() -> list[Path]:
+    """Delete the stored token and browser profile. Returns what was removed."""
+    removed = []
+    if (path := credentials_path()).exists():
+        path.unlink()
+        removed.append(path)
+    if (profile := profile_dir()).exists():
+        shutil.rmtree(profile)
+        removed.append(profile)
+    return removed
 
 
 def save(creds: Credentials) -> Path:

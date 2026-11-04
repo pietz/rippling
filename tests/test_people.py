@@ -7,6 +7,8 @@ ROWS = [
         "RoleWithCompany:department": ["Engineering"],
         "RoleWithCompany:manager": {"id": "r2", "fullName": "Charles Babbage"},
         "RoleWithCompany:workEmail": "ada@example.com",
+        "RoleWithCompany:startDate": "2020-01-01",
+        "Job:location.nickname": "Berlin",
     },
     {
         "RoleWithCompany:id": {"id": "r2", "fullName": "Charles Babbage"},
@@ -30,5 +32,13 @@ def test_search_matches_all_words_across_fields():
     assert [p["id"] for p in people.search(everyone, "engineer ada")] == ["r1"]
     assert len(people.search(everyone, "engineering")) == 2
     assert people.search(everyone, "nobody") == []
-    assert len(people.search(everyone, "")) == 2
+    assert people.search(everyone, "") == []  # no directory dumps
+    assert people.search(everyone, "   ") == []
     assert people.find(everyone, "r2")["title"] == "CTO"
+
+
+def test_search_returns_only_colleague_fields():
+    everyone = [people.person_view(r) for r in ROWS]
+    (ada,) = people.search(everyone, "ada")
+    assert set(ada) == set(people.COLLEAGUE_FIELDS)
+    assert "start_date" not in ada and "location" not in ada
