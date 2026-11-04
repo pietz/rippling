@@ -1,24 +1,37 @@
-"""`rippling` command line: login, balance, hours, vacation."""
+"""`rippling` command line.
+
+rippling login | whoami | holidays
+rippling hours  log | week | month
+rippling leave  balance | request | list | cancel
+rippling people search
+"""
 
 from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Annotated
 
 import typer
 
 from . import __version__, auth
 from . import core as rp
+from . import people as ppl
 from .api import BASE, ApiError, Client, TransportError
 from .login import LoginError, wait_for_login
 
 app = typer.Typer(
-    no_args_is_help=True,
-    add_completion=False,
-    pretty_exceptions_enable=False,
+    no_args_is_help=True, add_completion=False, pretty_exceptions_enable=False
 )
+hours_app = typer.Typer(no_args_is_help=True, help="Log and review working hours.")
+leave_app = typer.Typer(
+    no_args_is_help=True, help="Vacation: balance, requests, cancelling."
+)
+people_app = typer.Typer(no_args_is_help=True, help="Look up colleagues.")
+app.add_typer(hours_app, name="hours")
+app.add_typer(leave_app, name="leave")
+app.add_typer(people_app, name="people")
 
 YES = Annotated[
     bool,
@@ -26,6 +39,7 @@ YES = Annotated[
         "--yes", "-y", help="Send without asking. Writes are dry-run otherwise."
     ),
 ]
+JSON = Annotated[bool, typer.Option("--json", help="Machine-readable output.")]
 
 
 def _version(value: bool) -> None:
@@ -46,10 +60,13 @@ def _root(
         ),
     ] = False,
 ) -> None:
-    """Unofficial CLI for Rippling: log hours, breaks and vacation, check your balance.
+    """Unofficial CLI for Rippling: log hours, request vacation, check balances, find colleagues.
 
-    Writes (hours, vacation) are dry-run by default: they print exactly what they would send and ask before sending.
+    Writes (hours log, leave request, leave cancel) are dry-run by default: they print exactly what they would send and ask before sending.
     """
+
+
+# ---------------------------------------------------------------- helpers
 
 
 def _err(msg: str) -> None:
@@ -62,6 +79,14 @@ def _client() -> Client:
         return Client(auth.load())
     except auth.AuthError as e:
         _err(str(e))
+
+
+def _print_json(data: object) -> None:
+    typer.echo(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+
+
+def _hours(h: float) -> str:
+    return f"{h:g} h"
 
 
 def _post_write(c: Client, path: str, body: dict) -> object:
@@ -96,20 +121,20 @@ def _send_or_dry_run(method: str, path: str, body: dict, yes: bool) -> bool:
     return False
 
 
+# ---------------------------------------------------------------- top level
+
+
 @app.command()
 def login(
     timeout: Annotated[
         int, typer.Option(help="Seconds to wait for you to finish logging in.")
     ] = 600,
 ) -> None:
-    """Log in through a browser window and store the token locally."""
+    """Log in through a browser window and store the token locally (lasts ~30 days)."""
 
     def verify(creds: auth.Credentials) -> bool:
         try:
-            Client(creds).get(
-                "/time_tracking/api/time_entry_policies/get_default_timezone_country_for_roles",
-                roles=creds.role_id,
-            )
+            rp.timezone(Client(creds))
             return True
         except (auth.AuthError, ApiError, TransportError):
             return False
@@ -131,38 +156,45 @@ def login(
 
 
 @app.command()
-def balance(
-    as_json: Annotated[
-        bool, typer.Option("--json", help="Machine-readable output.")
-    ] = False,
-) -> None:
-    """Show leave balances (policies with no balance or usage are hidden)."""
+def whoami(as_json: JSON = False) -> None:
+    """Show who you're logged in as: name, title, team, manager, email."""
     c = _client()
-    fields = ("availableBalanceDays", "daysUsed", "daysPending", "daysScheduled")
-    rows = [
-        {
-            "policy": p["policyDisplayName"].strip(),
-            **{k: float(p.get(k) or 0) for k in fields},
-        }
-        for p in rp.pto_summary(c)
-    ]
-    rows = [r for r in rows if any(r[k] for k in fields)]
+    me = ppl.find(ppl.directory(c), c.creds.role_id)
+    if not me:
+        _err("Couldn't find your own entry in the org chart.")
+    me = me | {"token_expires": datetime.fromtimestamp(c.creds.expires_at).isoformat()}
     if as_json:
-        typer.echo(json.dumps(rows, indent=2))
+        _print_json(me)
         return
-    width = max([len(r["policy"]) for r in rows] + [6])
-    typer.echo(
-        f"{'Policy':<{width}}  {'Available':>9}  {'Used':>6}  {'Pending':>7}  {'Scheduled':>9}"
-    )
-    for r in rows:
-        typer.echo(
-            f"{r['policy']:<{width}}  {r['availableBalanceDays']:>9g}  {r['daysUsed']:>6g}"
-            f"  {r['daysPending']:>7g}  {r['daysScheduled']:>9g}"
-        )
+    _print_person(me)
+    typer.echo(f"  {'login':<11} valid until {me['token_expires'][:10]}")
 
 
 @app.command()
-def hours(
+def holidays(
+    year: Annotated[
+        int | None, typer.Option(help="Year to show. Default: this year.")
+    ] = None,
+    as_json: JSON = False,
+) -> None:
+    """List your company's public holidays."""
+    c = _client()
+    year = year or date.today().year
+    days = sorted((d, name) for d, name in rp.holidays(c).items() if d.year == year)
+    if as_json:
+        _print_json([{"date": d.isoformat(), "name": n} for d, n in days])
+        return
+    if not days:
+        typer.echo(f"No holidays found for {year}.")
+    for d, name in days:
+        typer.echo(f"{d:%a %Y-%m-%d}  {name}")
+
+
+# ---------------------------------------------------------------- hours
+
+
+@hours_app.command("log")
+def hours_log(
     day: Annotated[str, typer.Argument(help="YYYY-MM-DD, 'today' or 'yesterday'.")],
     start: Annotated[str, typer.Argument(help="Start time, HH:MM local.")],
     end: Annotated[str, typer.Argument(help="End time, HH:MM local.")],
@@ -206,16 +238,16 @@ def hours(
     brk = ", ".join(f"{a:%H:%M}-{b:%H:%M}" for a, b in spans)
     label = f", break {brk} ({break_type.name})" if spans else ""
     typer.echo(
-        f"  {'new:  ' if old else ''}{t0:%H:%M}-{t1:%H:%M}{label}, {worked // 60}:{worked % 60:02d} h worked"
+        f"  {'new:  ' if old else ''}{t0:%H:%M}-{t1:%H:%M}{label}, "
+        f"{worked // 60}:{worked % 60:02d} h worked"
     )
 
     if not _send_or_dry_run("POST", rp.TIME_ENTRY_PATH, body, yes):
         return
     res = _post_write(c, rp.TIME_ENTRY_PATH, body)
     event = (res if isinstance(res, dict) else {}).get("event") or {}
-    typer.echo(
-        f"Sent. Rippling returned entry {str(event.get('id', '?')).removeprefix('TimeEntry:')}."
-    )
+    entry_id = str(event.get("id", "?")).removeprefix("TimeEntry:")
+    typer.echo(f"Sent. Rippling returned entry {entry_id}.")
     try:
         after = rp.entries_on(c, d, tz)
     except (ApiError, TransportError) as e:
@@ -229,8 +261,169 @@ def hours(
         )
 
 
-@app.command()
-def vacation(
+def _entry_text(v: dict) -> str:
+    out = f"{v['start']}-{v['end'] or 'open'}"
+    if v["breaks"]:
+        out += ", break " + ", ".join(f"{b['start']}-{b['end']}" for b in v["breaks"])
+    return out
+
+
+def _show_timesheet(
+    title: str, days: list[rp.Day], tz: str, as_json: bool, skip_empty: bool
+) -> None:
+    today = rp.today_in(tz)
+    worked = round(sum(d.worked for d in days), 2)
+    scheduled = round(sum(d.scheduled for d in days), 2)
+    if as_json:
+        _print_json(
+            {
+                "timezone": tz,
+                "start": days[0].date,
+                "end": days[-1].date,
+                "worked_hours": worked,
+                "scheduled_hours": scheduled,
+                "days": [
+                    {
+                        "date": d.date,
+                        "weekday": f"{d.date:%a}",
+                        "scheduled_hours": d.scheduled,
+                        "worked_hours": d.worked,
+                        "holiday": d.holiday,
+                        "leave": d.leave,
+                        "missing": d.missing(today),
+                        "entries": d.entries,
+                    }
+                    for d in days
+                ],
+            }
+        )
+        return
+    typer.echo(f"{title} ({tz})")
+    for d in days:
+        label = f"{d.date:%a %d.%m.}"
+        notes = [n for n in (d.holiday, d.leave) if n]
+        if not d.entries and not notes and not d.missing(today):
+            if not skip_empty or d.scheduled:
+                typer.echo(f"  {label}  -")
+            continue
+        for i, v in enumerate(d.entries):
+            status = f"  {v['status']}" if v["status"] else ""
+            hours = _hours(v["worked_hours"]) if v["worked_hours"] is not None else "?"
+            typer.echo(
+                f"  {label if i == 0 else ' ' * len(label)}  {_entry_text(v):<30} {hours:>6}{status}"
+            )
+        if d.missing(today):
+            typer.secho(
+                f"  {label}  missing ({_hours(d.scheduled)} scheduled)", fg="yellow"
+            )
+        for n in notes:
+            typer.echo(f"  {label if not d.entries else ' ' * len(label)}  {n}")
+    typer.echo(f"Total: {_hours(worked)} worked of {_hours(scheduled)} scheduled")
+
+
+@hours_app.command("week")
+def hours_week(
+    day: Annotated[
+        str,
+        typer.Argument(help="Any day in the week: YYYY-MM-DD, 'today' or 'yesterday'."),
+    ] = "today",
+    as_json: JSON = False,
+) -> None:
+    """Show a week (Mon-Sun): entries, breaks, hours worked vs. scheduled, approval."""
+    c = _client()
+    tz = rp.timezone(c)
+    try:
+        d = rp.parse_date(day, rp.today_in(tz))
+    except ValueError as e:
+        _err(str(e))
+    monday = d - timedelta(days=d.weekday())
+    sunday = monday + timedelta(days=6)
+    days = rp.timesheet(c, monday, sunday, tz)
+    _show_timesheet(f"Week {monday:%d.%m.}-{sunday:%d.%m.%Y}", days, tz, as_json, False)
+
+
+@hours_app.command("month")
+def hours_month(
+    month: Annotated[
+        str | None, typer.Argument(help="YYYY-MM. Default: this month.")
+    ] = None,
+    as_json: JSON = False,
+) -> None:
+    """Show a month: entries per day, missing days, hours worked vs. scheduled."""
+    c = _client()
+    tz = rp.timezone(c)
+    try:
+        first = (
+            date.fromisoformat(f"{month}-01")
+            if month
+            else rp.today_in(tz).replace(day=1)
+        )
+    except ValueError:
+        _err(f"Invalid month {month!r}; use YYYY-MM.")
+    last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(
+        days=1
+    )
+    days = rp.timesheet(c, first, last, tz)
+    _show_timesheet(f"{first:%B %Y}", days, tz, as_json, True)
+
+
+# ---------------------------------------------------------------- leave
+
+
+@leave_app.command("balance")
+def leave_balance(
+    on: Annotated[
+        str | None,
+        typer.Option(
+            help="Also show Rippling's projected balance on this date (YYYY-MM-DD)."
+        ),
+    ] = None,
+    as_json: JSON = False,
+) -> None:
+    """Show leave balances in days (policies with no balance or usage are hidden)."""
+    c = _client()
+    try:
+        on_date = rp.parse_date(on) if on else None
+    except ValueError as e:
+        _err(str(e))
+    fields = ("availableBalanceDays", "daysUsed", "daysPending", "daysScheduled")
+    rows = [
+        {
+            "policy": p["policyDisplayName"].strip(),
+            "policy_id": p["leavePolicyId"],
+            **{k: float(p.get(k) or 0) for k in fields},
+        }
+        for p in rp.pto_summary(c)
+    ]
+    rows = [r for r in rows if any(r[k] for k in fields)]
+    if on_date:
+        balances = rp.current_balances(c)
+        for r in rows:
+            b = balances.get(r["policy_id"])
+            r["forecast"] = (
+                rp.forecast_days(c, r["policy_id"], b, on_date) if b else None
+            )
+    if as_json:
+        _print_json([r | ({"forecast_date": on_date} if on_date else {}) for r in rows])
+        return
+    width = max([len(r["policy"]) for r in rows] + [6])
+    extra = f"  {'On ' + f'{on_date:%d.%m.%Y}':>13}" if on_date else ""
+    typer.echo(
+        f"{'Policy':<{width}}  {'Available':>9}  {'Used':>6}  {'Pending':>7}  {'Scheduled':>9}{extra}"
+    )
+    for r in rows:
+        line = (
+            f"{r['policy']:<{width}}  {r['availableBalanceDays']:>9g}  {r['daysUsed']:>6g}"
+            f"  {r['daysPending']:>7g}  {r['daysScheduled']:>9g}"
+        )
+        if on_date:
+            projected = "-" if r["forecast"] is None else f"{r['forecast']:g}"
+            line += f"  {projected:>13}"
+        typer.echo(line)
+
+
+@leave_app.command("request")
+def leave_request(
     start: Annotated[str, typer.Argument(help="First day off, YYYY-MM-DD or 'today'.")],
     end: Annotated[str, typer.Argument(help="Last day off (inclusive), YYYY-MM-DD.")],
     reason: Annotated[
@@ -276,9 +469,119 @@ def vacation(
     res = _post_write(c, rp.LEAVE_REQUEST_PATH, body)
     res = res if isinstance(res, dict) else {}
     typer.echo(
-        f"Sent. Request {res.get('id', '?')}: {res.get('startDate', d0)} to {res.get('endDate', d1)}, "
-        f"{res.get('numDays', '?')} day(s), status {res.get('status', '?')}."
+        f"Sent. Request {res.get('id', '?')}: {res.get('startDate', d0)} to "
+        f"{res.get('endDate', d1)}, {res.get('numDays', '?')} day(s), "
+        f"status {res.get('status', '?')}."
     )
+
+
+@leave_app.command("list")
+def leave_list(
+    show_all: Annotated[
+        bool, typer.Option("--all", help="Include requests from previous years.")
+    ] = False,
+    as_json: JSON = False,
+) -> None:
+    """List your leave requests, newest first (this year and later by default)."""
+    c = _client()
+    since = date(date.today().year, 1, 1)
+    rows = [rp.leave_view(r) for r in rp.leave_requests(c)]
+    if not show_all:
+        rows = [r for r in rows if date.fromisoformat(r["end"]) >= since]
+    rows.sort(key=lambda r: r["start"], reverse=True)
+    if as_json:
+        _print_json(rows)
+        return
+    if not rows:
+        typer.echo(
+            "No leave requests" + ("." if show_all else " this year. Try --all.")
+        )
+        return
+    width = max(len(r["policy"]) for r in rows)
+    typer.echo(
+        f"{'Start':<10}  {'End':<10}  {'Days':>4}  {'Policy':<{width}}  {'Status':<9}  Id"
+    )
+    for r in rows:
+        typer.echo(
+            f"{r['start']:<10}  {r['end']:<10}  {r['days']:>4g}  {r['policy']:<{width}}"
+            f"  {r['status']:<9}  {r['id']}"
+        )
+
+
+@leave_app.command("cancel")
+def leave_cancel(
+    request_id: Annotated[
+        str,
+        typer.Argument(
+            help="Request id from `rippling leave list` (or its first 6+ chars)."
+        ),
+    ],
+    yes: YES = False,
+) -> None:
+    """Cancel one of your leave requests. Your approver may be notified."""
+    c = _client()
+    try:
+        r = rp.find_leave(rp.leave_requests(c), request_id)
+    except ValueError as e:
+        _err(str(e))
+    v = rp.leave_view(r)
+    if r.get("status") in rp.INACTIVE_LEAVE:
+        _err(f"Request {v['id']} is already {v['status']}.")
+    typer.echo(
+        f"Cancel {v['policy']} {v['start']} to {v['end']} ({v['days']:g} day(s), {v['status']})"
+    )
+    path = rp.cancel_path(v["id"])
+    if not _send_or_dry_run("POST", path, {}, yes):
+        return
+    _post_write(c, path, {})
+    try:
+        after = rp.find_leave(rp.leave_requests(c), v["id"])
+        typer.echo(f"Sent. Request {v['id']} is now {after.get('status')}.")
+    except (ApiError, TransportError, ValueError) as e:
+        typer.secho(f"Sent, but reading it back failed ({e}).", fg="yellow")
+
+
+# ---------------------------------------------------------------- people
+
+
+def _print_person(p: dict) -> None:
+    typer.echo(p["name"] or "?")
+    rows = [
+        ("title", p["title"]),
+        ("department", p["department"]),
+        ("manager", p["manager"]),
+        ("email", p["email"]),
+        ("location", ", ".join(x for x in (p["location"], p["country"]) if x) or None),
+        ("since", p["start_date"]),
+    ]
+    for k, v in rows:
+        if v:
+            typer.echo(f"  {k:<11} {v}")
+
+
+@people_app.command("search")
+def people_search(
+    query: Annotated[
+        str | None,
+        typer.Argument(
+            help="Words to match in name, title, department or email. Empty lists everyone."
+        ),
+    ] = None,
+    as_json: JSON = False,
+) -> None:
+    """Find colleagues: title, department, manager and work email."""
+    c = _client()
+    found = ppl.search(ppl.directory(c), query or "")
+    if as_json:
+        _print_json(found)
+        return
+    if not found:
+        typer.echo("Nobody matches.")
+        return
+    for i, p in enumerate(found):
+        if i:
+            typer.echo("")
+        _print_person(p)
 
 
 def main() -> None:

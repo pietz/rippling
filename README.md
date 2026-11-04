@@ -1,7 +1,8 @@
 # rippling
 
-Unofficial command-line client for [Rippling](https://www.rippling.com): log working hours,
-breaks and vacation and check your vacation balance from the terminal.
+Unofficial command-line client for [Rippling](https://www.rippling.com): log and review working
+hours, request and cancel vacation, check balances and holidays, and look up colleagues from the
+terminal.
 
 ## Install
 
@@ -15,24 +16,36 @@ Brave, Chromium or Helium). Set `RIPPLING_BROWSER` to a browser executable to pi
 ## Use
 
 ```bash
-rippling login                                        # browser window: log in, 2FA; done
-rippling balance
-rippling hours today 09:00 18:00 --break 12:00-13:00
-rippling vacation 2026-12-21 2026-12-23 --reason "Winter break"
+rippling login                                   # browser window: log in once, ~30 days
+
+rippling hours log today 09:00 18:00 --break 12:00-13:00
+rippling hours week                              # this week: entries, breaks, missing days
+rippling hours month 2026-10
+
+rippling leave balance --on 2027-04-01           # today's balance plus a projection
+rippling leave request 2026-12-21 2026-12-23 --reason "Winter break"
+rippling leave list
+rippling leave cancel 1a2b3c
+
+rippling holidays --year 2027
+rippling people search engineering
+rippling whoami
 ```
 
-**Status: early.** `balance` and `hours` are verified against the live API. The `vacation`
-payload mirrors what the web app's code sends but hasn't been confirmed by a live submission
-yet; check the result in the web app after your first request.
+Every command explains itself with `--help`. Read commands take `--json` for scripts and agents.
 
-**Writes are dry-run by default.** `hours` and `vacation` print exactly what they would send
-and ask before sending. Without a terminal (scripts, agents) they stop after the dry-run;
-pass `--yes` to send.
+**Writes are dry-run by default.** `hours log`, `leave request` and `leave cancel` print exactly
+what they would send and ask before sending. Without a terminal (scripts, agents) they stop
+after the dry-run; pass `--yes` to send.
 
-- `hours` sets one day: it creates the entry or replaces that day's existing one completely
+- `hours log` sets one day: it creates the entry or replaces that day's existing one completely
   (times and breaks). It can't delete entries, and it refuses to replace entries with job codes.
-- `vacation` uses the Annual Leave Policy, end date inclusive, and runs Rippling's own
+- `leave request` uses the Annual Leave Policy, end date inclusive, and runs Rippling's own
   validation first. Sending notifies your approver.
+
+**Status: early.** Reads and `hours log` are verified against the live API. `leave request`
+and `leave cancel` mirror what the web app's code sends but haven't been confirmed by a live
+submission yet; check the result in the web app after first use.
 
 ## How auth works
 

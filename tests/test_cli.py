@@ -1,5 +1,6 @@
 """The write commands must never send without --yes (or an interactive yes)."""
 
+import json
 from datetime import date
 
 import pytest
@@ -55,8 +56,8 @@ def fake(monkeypatch):
     return client
 
 
-HOURS = ["hours", "2026-11-04", "09:00", "18:00", "--break", "12:00-13:00"]
-VACATION = ["vacation", "2026-12-21", "2026-12-24"]
+HOURS = ["hours", "log", "2026-11-04", "09:00", "18:00", "--break", "12:00-13:00"]
+VACATION = ["leave", "request", "2026-12-21", "2026-12-24"]
 
 
 @pytest.mark.parametrize("args", [HOURS, VACATION])
@@ -142,3 +143,58 @@ def test_refuses_ambiguous_or_locked_days(fake, monkeypatch, entries, message):
 def test_version():
     result = CliRunner().invoke(cli.app, ["--version"])
     assert result.exit_code == 0 and result.output.startswith("rippling ")
+
+
+LEAVE = {
+    "id": "1a2b3caaaaaaaaaaaaaaaaaa",
+    "startDate": "2026-12-21",
+    "endDate": "2026-12-23",
+    "numDays": "3.00",
+    "policyDisplayName": "Annual Leave Policy",
+    "status": "PENDING",
+}
+
+
+@pytest.mark.parametrize("extra, sends", [([], 0), (["--yes"], 1)])
+def test_leave_cancel_is_gated(fake, monkeypatch, extra, sends):
+    monkeypatch.setattr(rp, "leave_requests", lambda c: [LEAVE])
+    result = CliRunner().invoke(cli.app, ["leave", "cancel", "1a2b3c", *extra])
+    assert result.exit_code == 0, result.output
+    assert len(fake.sent) == sends
+    if sends:
+        assert fake.sent[0] == (
+            "/pto/api/leave_requests/1a2b3caaaaaaaaaaaaaaaaaa/cancel/",
+            {},
+        )
+
+
+def test_leave_cancel_refuses_inactive(fake, monkeypatch):
+    monkeypatch.setattr(
+        rp, "leave_requests", lambda c: [LEAVE | {"status": "CANCELED"}]
+    )
+    result = CliRunner().invoke(cli.app, ["leave", "cancel", "1a2b3c", "--yes"])
+    assert result.exit_code == 1 and "already CANCELED" in result.output
+    assert fake.sent == []
+
+
+def test_hours_week_json(fake, monkeypatch):
+    entry = {
+        "id": "e1",
+        "date": "2026-11-02",
+        "start": "09:00",
+        "end": "18:00",
+        "breaks": [{"start": "12:00", "end": "13:00"}],
+        "worked_hours": 8.0,
+        "status": "approved",
+    }
+    monkeypatch.setattr(rp, "today_in", lambda tz: date(2026, 11, 4))
+    monkeypatch.setattr(rp, "entry_view", lambda e, tz: e)
+    monkeypatch.setattr(rp, "time_entries", lambda c, a, b, tz: [entry])
+    monkeypatch.setattr(rp, "leave_requests", lambda c: [])
+    result = CliRunner().invoke(cli.app, ["hours", "week", "2026-11-04", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["start"] == "2026-11-02" and data["end"] == "2026-11-08"
+    assert data["worked_hours"] == 8.0 and data["scheduled_hours"] == 40.0
+    missing = [d["date"] for d in data["days"] if d["missing"]]
+    assert missing == ["2026-11-03"]  # past workday without entry; 04.11. is today

@@ -205,13 +205,17 @@ def timezone(c: Client) -> str:
     return data[c.creds.role_id]["timezone"]
 
 
-def pay_period_start(c: Client, day: date) -> date | None:
+def pay_periods(c: Client) -> list[tuple[date, date]]:
     data = c.get(
         "/time_tracking/api/time_entries/get_pay_periods_for_role", role=c.creds.role_id
     )
-    for start, end in data["periods"]:
-        if date.fromisoformat(start) <= day <= date.fromisoformat(end):
-            return date.fromisoformat(start)
+    return [(date.fromisoformat(a), date.fromisoformat(b)) for a, b in data["periods"]]
+
+
+def pay_period_start(c: Client, day: date) -> date | None:
+    for start, end in pay_periods(c):
+        if start <= day <= end:
+            return start
     return None
 
 
@@ -224,20 +228,29 @@ def summary_id(c: Client, period_start: date) -> str | None:
     return data["ids"][0] if data["ids"] else None
 
 
+def time_entries(c: Client, start: date, end: date, tz: str) -> list[dict]:
+    """Time entries whose local start date lies in [start, end], oldest first."""
+    found = []
+    for p0, p1 in pay_periods(c):
+        if p1 < start or p0 > end:
+            continue
+        sid = summary_id(c, p0)
+        if not sid:
+            continue
+        events = c.twirp("ListTimeEntryEvents", {"summary_id": sid}).get("events", [])
+        found += [
+            e
+            for e in events
+            # The event list can also carry leave/holiday/shift events; only time entries count.
+            if e.get("time_entry_event_details")
+            and start <= local_date(e["event_times"]["start_time"], tz) <= end
+        ]
+    return sorted(found, key=lambda e: e["event_times"]["start_time"])
+
+
 def entries_on(c: Client, day: date, tz: str) -> list[dict]:
     """Existing time entries whose local start date is `day`."""
-    period = pay_period_start(c, day)
-    sid = summary_id(c, period) if period else None
-    if not sid:
-        return []
-    events = c.twirp("ListTimeEntryEvents", {"summary_id": sid}).get("events", [])
-    return [
-        e
-        for e in events
-        # The event list can also carry leave/holiday/shift events; only time entries count.
-        if e.get("time_entry_event_details")
-        and local_date(e["event_times"]["start_time"], tz) == day
-    ]
+    return time_entries(c, day, day, tz)
 
 
 def manual_break_type(c: Client) -> BreakType:
@@ -267,28 +280,95 @@ def manual_break_type(c: Client) -> BreakType:
     return BreakType(id=t["id"], name=t["description"], paid=bool(t.get("isPaid")))
 
 
-def describe_entry(e: dict, tz: str) -> str:
+def entry_view(e: dict, tz: str) -> dict:
+    """A time entry in local time, reduced to what people care about."""
     times = e["event_times"]
     details = e.get("time_entry_event_details") or {}
-    span = (
-        f"{local_hhmm(times['start_time'], tz)}-{local_hhmm(times['end_time'], tz)}"
-        if times.get("end_time")
-        else (f"{local_hhmm(times['start_time'], tz)}-open")
+    breaks = [b for b in details.get("breaks") or [] if b.get("end_time")]
+    worked = e.get("worked_hours")
+    if worked is None and times.get("end_time"):
+        start = datetime.fromisoformat(times["start_time"])
+        end = datetime.fromisoformat(times["end_time"])
+        unpaid = sum(
+            b.get("duration_minutes") or 0 for b in breaks if not b.get("is_paid")
+        )
+        worked = round(((end - start).total_seconds() / 60 - unpaid) / 60, 2)
+    status = (e.get("approval_status") or "").removeprefix(
+        "TIME_ENTRY_APPROVAL_STATUS_"
     )
-    brks = [
-        f"{local_hhmm(b['start_time'], tz)}-{local_hhmm(b['end_time'], tz)}"
-        for b in details.get("breaks") or []
-        if b.get("end_time")
+    return {
+        "id": e["id"],
+        "date": local_date(times["start_time"], tz).isoformat(),
+        "start": local_hhmm(times["start_time"], tz),
+        "end": local_hhmm(times["end_time"], tz) if times.get("end_time") else None,
+        "breaks": [
+            {
+                "start": local_hhmm(b["start_time"], tz),
+                "end": local_hhmm(b["end_time"], tz),
+            }
+            for b in breaks
+        ],
+        "worked_hours": worked,
+        "status": status.lower() or None,
+    }
+
+
+def describe_entry(e: dict, tz: str) -> str:
+    v = entry_view(e, tz)
+    out = f"{v['start']}-{v['end'] or 'open'}"
+    if v["breaks"]:
+        out += ", break " + ", ".join(f"{b['start']}-{b['end']}" for b in v["breaks"])
+    if v["worked_hours"] is not None:
+        out += f", {v['worked_hours']:g} h worked"
+    return out + (f" [{v['status']}]" if v["status"] else "")
+
+
+@dataclass
+class Day:
+    date: date
+    entries: list[dict]  # entry_view dicts
+    scheduled: float  # hours expected; 0 on weekends, holidays and leave days
+    holiday: str | None = None
+    leave: str | None = None
+
+    @property
+    def worked(self) -> float:
+        return round(sum(e["worked_hours"] or 0 for e in self.entries), 2)
+
+    def missing(self, today: date) -> bool:
+        return self.scheduled > 0 and not self.entries and self.date < today
+
+
+def timesheet(c: Client, start: date, end: date, tz: str) -> list[Day]:
+    """One row per day in [start, end]: entries, expected hours, holiday, leave."""
+    entries = [entry_view(e, tz) for e in time_entries(c, start, end, tz)]
+    schedule = schedule_hours(c, start)
+    hol = holidays(c)
+    leaves = [
+        r
+        for r in leave_requests(c)
+        if r.get("status") not in INACTIVE_LEAVE
+        and date.fromisoformat(r["startDate"]) <= end
+        and date.fromisoformat(r["endDate"]) >= start
     ]
-    status = (
-        (e.get("approval_status") or "")
-        .removeprefix("TIME_ENTRY_APPROVAL_STATUS_")
-        .lower()
-    )
-    out = span + (f", break {', '.join(brks)}" if brks else "")
-    if e.get("worked_hours") is not None:
-        out += f", {e['worked_hours']:g} h worked"
-    return out + (f" [{status}]" if status else "")
+    days, d = [], start
+    while d <= end:
+        leave = next(
+            (
+                f"{r['policyDisplayName'].strip()} ({r['status'].lower()})"
+                for r in leaves
+                if date.fromisoformat(r["startDate"])
+                <= d
+                <= date.fromisoformat(r["endDate"])
+            ),
+            None,
+        )
+        holiday = hol.get(d)
+        scheduled = 0.0 if (holiday or leave) else schedule[d.weekday()]
+        todays = [e for e in entries if e["date"] == d.isoformat()]
+        days.append(Day(d, todays, scheduled, holiday, leave))
+        d += timedelta(days=1)
+    return days
 
 
 # ---------------------------------------------------------------- leave
@@ -350,6 +430,7 @@ def working_days(
 
 
 def schedule_hours(c: Client, anchor: date) -> list[float]:
+    """Scheduled hours per weekday, Monday first, for the week around `anchor`."""
     data = c.post(
         "/pto/api/get_working_schedule/",
         {
@@ -358,7 +439,15 @@ def schedule_hours(c: Client, anchor: date) -> list[float]:
             "anchorDate": anchor.strftime("%m/%d/%Y"),
         },
     )
-    return [float(h) for h in data]
+    return monday_first(anchor, [float(h) for h in data])
+
+
+def monday_first(anchor: date, hours: list[float]) -> list[float]:
+    """Rippling returns the 7 days starting at the anchor date; reorder to Mon..Sun."""
+    out = [0.0] * 7
+    for i, h in enumerate(hours[:7]):
+        out[(anchor.weekday() + i) % 7] = h
+    return out
 
 
 def holidays(c: Client) -> dict[date, str]:
@@ -407,12 +496,78 @@ def validation_errors(res: object) -> list[str]:
     ]
 
 
+def leave_requests(c: Client) -> list[dict]:
+    return c.get("/pto/api/leave_requests/", role=c.creds.role_id)
+
+
 def overlapping_leave(c: Client, start: date, end: date) -> list[dict]:
-    reqs = c.get("/pto/api/leave_requests/", role=c.creds.role_id)
     return [
         r
-        for r in reqs
+        for r in leave_requests(c)
         if r.get("status") not in INACTIVE_LEAVE
         and date.fromisoformat(r["startDate"]) <= end
         and date.fromisoformat(r["endDate"]) >= start
     ]
+
+
+def leave_view(r: dict) -> dict:
+    return {
+        "id": r["id"],
+        "start": r["startDate"],
+        "end": r["endDate"],
+        "days": float(r.get("numDays") or 0),
+        "policy": (r.get("policyDisplayName") or "").strip(),
+        "status": r.get("status"),
+        "reason": r.get("reasonForLeave") or None,
+    }
+
+
+def find_leave(requests: list[dict], ident: str) -> dict:
+    """A request by full id or unique id prefix (at least 6 characters)."""
+    ident = ident.strip()
+    exact = [r for r in requests if r["id"] == ident]
+    if exact:
+        return exact[0]
+    if len(ident) < 6:
+        raise ValueError("Give the full request id or at least its first 6 characters.")
+    matches = [r for r in requests if r["id"].startswith(ident)]
+    if not matches:
+        raise ValueError(
+            f"No leave request with id {ident!r}. See `rippling leave list --all`."
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"Id prefix {ident!r} matches {len(matches)} requests; give more of it."
+        )
+    return matches[0]
+
+
+def cancel_path(request_id: str) -> str:
+    return f"{LEAVE_REQUEST_PATH}{request_id}/cancel/"
+
+
+def current_balances(c: Client) -> dict[str, dict]:
+    """Current balance rows keyed by leave policy id."""
+    rows = c.get(
+        "/pto/api/current_balances/", company=c.creds.company_id, role=c.creds.role_id
+    )
+    return {r["leavePolicy"]: r for r in rows}
+
+
+def forecast_days(c: Client, policy_id: str, balance: dict, on: date) -> float | None:
+    """Rippling's projected balance (days) for a policy on a date, or None if unavailable."""
+    us = on.strftime("%m/%d/%Y")  # this endpoint wants US dates, unlike the rest of PTO
+    res = c.post(
+        "/pto/api/forecast_balance/",
+        {
+            "role": c.creds.role_id,
+            "leavePolicy": policy_id,
+            "date": us,
+            "endDate": us,
+            "currentBalanceInMins": balance["balanceInMins"],
+            "currentBalanceInDays": balance["balanceInDays"],
+        },
+    )
+    if not isinstance(res, dict) or not res.get("forecastAvailable"):
+        return None
+    return float(res["balanceDays"])

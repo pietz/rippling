@@ -1,7 +1,7 @@
 [project]
 name = "rippling"
-version = "0.1.0"
-description = "Unofficial CLI for Rippling: log hours, breaks and vacation, check your balance. Not affiliated with Rippling."
+version = "0.2.0"
+description = "Unofficial CLI for Rippling: log and review hours, request vacation, check balances, find colleagues. Not affiliated with Rippling."
 readme = "README.md"
 authors = [
     { name = "Paul-Louis Pröve", email = "mail@plpp.de" }

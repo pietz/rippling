@@ -184,3 +184,53 @@ def test_build_leave_request():
     )
     with pytest.raises(ValueError):
         rp.build_leave_request("r", "c", "p", date(2026, 12, 23), date(2026, 12, 21))
+
+
+REQS = [
+    {"id": "1a2b3c" + "a" * 18},
+    {"id": "6ab3f8" + "b" * 18},
+    {"id": "6ab3f8" + "c" * 18},
+]
+
+
+def test_find_leave_by_id_or_unique_prefix():
+    assert rp.find_leave(REQS, "1a2b3c")["id"] == REQS[0]["id"]
+    assert rp.find_leave(REQS, REQS[2]["id"])["id"] == REQS[2]["id"]
+    with pytest.raises(ValueError, match="matches 2"):
+        rp.find_leave(REQS, "6ab3f8")
+    with pytest.raises(ValueError, match="at least"):
+        rp.find_leave(REQS, "6ab")
+    with pytest.raises(ValueError, match="No leave request"):
+        rp.find_leave(REQS, "ffffff")
+
+
+def test_entry_view_computes_worked_hours_when_missing():
+    e = {
+        "id": "x",
+        "event_times": {
+            "start_time": "2026-11-04T08:00:00Z",
+            "end_time": "2026-11-04T17:00:00Z",
+        },
+        "time_entry_event_details": {
+            "breaks": [
+                {
+                    "start_time": "2026-11-04T11:00:00Z",
+                    "end_time": "2026-11-04T12:00:00Z",
+                    "duration_minutes": 60,
+                }
+            ]
+        },
+        "approval_status": "TIME_ENTRY_APPROVAL_STATUS_APPROVED",
+    }
+    v = rp.entry_view(e, TZ)
+    assert v["start"] == "09:00" and v["end"] == "18:00" and v["date"] == "2026-11-04"
+    assert v["worked_hours"] == 8.0 and v["status"] == "approved"
+    assert v["breaks"] == [{"start": "12:00", "end": "13:00"}]
+
+
+def test_schedule_is_reordered_to_monday_first():
+    # Live shapes: anchor Thu 2026-10-01 and Sun 2026-11-08 for a Mon-Fri 8h schedule.
+    mon_fri = [8.0, 8.0, 8.0, 8.0, 8.0, 0.0, 0.0]
+    assert rp.monday_first(date(2026, 10, 1), [8, 8, 0, 0, 8, 8, 8]) == mon_fri
+    assert rp.monday_first(date(2026, 11, 8), [0, 8, 8, 8, 8, 8, 0]) == mon_fri
+    assert rp.monday_first(date(2026, 11, 2), mon_fri) == mon_fri
