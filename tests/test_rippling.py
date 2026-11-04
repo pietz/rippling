@@ -194,8 +194,8 @@ def test_build_leave_request():
 
 REQS = [
     {"id": "1a2b3c" + "a" * 18},
-    {"id": "6ab3f8" + "b" * 18},
-    {"id": "6ab3f8" + "c" * 18},
+    {"id": "1a2b3d" + "b" * 18},
+    {"id": "1a2b3d" + "c" * 18},
 ]
 
 
@@ -203,7 +203,7 @@ def test_find_leave_by_id_or_unique_prefix():
     assert rp.find_leave(REQS, "1a2b3c")["id"] == REQS[0]["id"]
     assert rp.find_leave(REQS, REQS[2]["id"])["id"] == REQS[2]["id"]
     with pytest.raises(ValueError, match="matches 2"):
-        rp.find_leave(REQS, "6ab3f8")
+        rp.find_leave(REQS, "1a2b3d")
     with pytest.raises(ValueError, match="at least"):
         rp.find_leave(REQS, "6ab")
     with pytest.raises(ValueError, match="No leave request"):
