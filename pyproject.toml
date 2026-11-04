@@ -1,0 +1,30 @@
+[project]
+name = "rippling"
+version = "0.1.0"
+description = "Unofficial CLI for Rippling: log hours, breaks and vacation, check your balance. Not affiliated with Rippling."
+readme = "README.md"
+authors = [
+    { name = "Paul-Louis Pröve", email = "mail@plpp.de" }
+]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+keywords = ["rippling", "time-tracking", "pto", "vacation", "cli", "unofficial"]
+dependencies = [
+    "curl-cffi>=0.17.0",
+    "typer>=0.27.3",
+    "tzdata; sys_platform == 'win32'",
+]
+
+[project.scripts]
+rippling = "rippling.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.3",
+]
