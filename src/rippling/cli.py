@@ -213,7 +213,9 @@ def hours(
         return
     res = _post_write(c, rp.TIME_ENTRY_PATH, body)
     event = (res if isinstance(res, dict) else {}).get("event") or {}
-    typer.echo(f"Sent. Rippling returned entry {event.get('id', '?')}.")
+    typer.echo(
+        f"Sent. Rippling returned entry {str(event.get('id', '?')).removeprefix('TimeEntry:')}."
+    )
     try:
         after = rp.entries_on(c, d, tz)
     except (ApiError, TransportError) as e:
