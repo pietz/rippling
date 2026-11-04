@@ -3,11 +3,6 @@
 Unofficial command-line client for [Rippling](https://www.rippling.com): log working hours,
 breaks and vacation and check your vacation balance from the terminal.
 
-> [!WARNING]
-> Unofficial and not affiliated with Rippling. It uses Rippling's undocumented web API, which
-> may break at any time, and using it may violate Rippling's terms or your employer's
-> policies. Use at your own risk.
-
 ## Install
 
 ```bash
@@ -64,3 +59,9 @@ uv run ruff check src tests
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Disclaimer
+
+Unofficial and not affiliated with Rippling. It uses Rippling's undocumented web API, which
+may break at any time, and using it may violate Rippling's terms or your employer's policies.
+Use at your own risk.
