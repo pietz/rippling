@@ -11,7 +11,7 @@ import typer
 
 from . import auth
 from . import core as rp
-from .api import BASE, ApiError, Client
+from .api import BASE, ApiError, Client, TransportError
 from .login import LoginError, wait_for_login
 
 app = typer.Typer(
@@ -39,6 +39,19 @@ def _client() -> Client:
         return Client(auth.load())
     except auth.AuthError as e:
         _err(str(e))
+
+
+def _post_write(c: Client, path: str, body: dict) -> object:
+    """Send a write once. Never retried: a retry could duplicate it."""
+    try:
+        return c.post(path, body)
+    except ApiError as e:
+        _err(f"Rippling rejected it: HTTP {e.status}\n{e.body[:2000]}")
+    except TransportError as e:
+        _err(
+            f"No clear answer from Rippling ({e}). It may or may not have been saved. "
+            "Check before retrying."
+        )
 
 
 def _send_or_dry_run(method: str, path: str, body: dict, yes: bool) -> bool:
@@ -72,7 +85,7 @@ def login(
                 roles=creds.role_id,
             )
             return True
-        except (auth.AuthError, ApiError):
+        except (auth.AuthError, ApiError, TransportError):
             return False
 
     typer.echo("Opening Rippling in a browser window...")
@@ -136,48 +149,50 @@ def hours(
     """Log working hours (and breaks) for one day. Replaces that day's entry if one exists."""
     c = _client()
     try:
-        d = rp.parse_date(day)
+        tz = rp.timezone(c)
+        d = rp.parse_date(day, rp.today_in(tz))
         t0, t1 = rp.parse_time(start), rp.parse_time(end)
         spans = [rp.parse_span(b) for b in breaks or []]
-        tz = rp.timezone(c)
         existing = rp.entries_on(c, d, tz)
         if len(existing) > 1:
             listed = "; ".join(rp.describe_entry(e, tz) for e in existing)
-            _err(
+            raise ValueError(
                 f"{d} already has {len(existing)} entries ({listed}). Edit them in the web app."
             )
+        old = existing[0] if existing else None
+        if old and (why := rp.update_blocker(old)):
+            raise ValueError(
+                f"Won't replace the entry on {d} ({rp.describe_entry(old, tz)}): {why}. "
+                "Edit it in the web app."
+            )
         break_type = rp.manual_break_type(c) if spans else None
-        object_id = existing[0]["id"] if existing else None
         body = rp.build_time_entry(
-            c.creds.role_id, d, t0, t1, spans, tz, break_type, object_id
+            c.creds.role_id, d, t0, t1, spans, tz, break_type, old
         )
     except ValueError as e:
         _err(str(e))
 
-    if existing and not existing[0].get("can_mutate", True):
-        _err(
-            f"The existing entry on {d} ({rp.describe_entry(existing[0], tz)}) can't be changed."
-        )
-    action = "Update" if existing else "Create"
-    worked = rp.worked_minutes(t0, t1, spans, break_type)
+    action = "Replace" if old else "Create"
+    worked = rp.worked_minutes(body, bool(break_type and break_type.paid))
     typer.echo(f"{action} time entry for {d:%a %Y-%m-%d} ({tz})")
-    if existing:
-        typer.echo(f"  now:  {rp.describe_entry(existing[0], tz)}")
+    if old:
+        typer.echo(f"  now:  {rp.describe_entry(old, tz)}")
     brk = ", ".join(f"{a:%H:%M}-{b:%H:%M}" for a, b in spans)
     label = f", break {brk} ({break_type.name})" if spans else ""
     typer.echo(
-        f"  {'new:  ' if existing else ''}{t0:%H:%M}-{t1:%H:%M}{label}, {worked // 60}:{worked % 60:02d} h worked"
+        f"  {'new:  ' if old else ''}{t0:%H:%M}-{t1:%H:%M}{label}, {worked // 60}:{worked % 60:02d} h worked"
     )
 
     if not _send_or_dry_run("POST", rp.TIME_ENTRY_PATH, body, yes):
         return
-    try:
-        res = c.post(rp.TIME_ENTRY_PATH, body)
-    except ApiError as e:
-        _err(f"Rippling rejected the entry: HTTP {e.status}\n{e.body[:2000]}")
-    event = (res or {}).get("event") or {}
+    res = _post_write(c, rp.TIME_ENTRY_PATH, body)
+    event = (res if isinstance(res, dict) else {}).get("event") or {}
     typer.echo(f"Sent. Rippling returned entry {event.get('id', '?')}.")
-    after = rp.entries_on(c, d, tz)
+    try:
+        after = rp.entries_on(c, d, tz)
+    except (ApiError, TransportError) as e:
+        typer.secho(f"  Saved, but reading it back failed ({e}).", fg="yellow")
+        return
     for e in after:
         typer.echo(f"  {d}: {rp.describe_entry(e, tz)}")
     if not after:
@@ -230,10 +245,7 @@ def vacation(
 
     if not _send_or_dry_run("POST", rp.LEAVE_REQUEST_PATH, body, yes):
         return
-    try:
-        res = c.post(rp.LEAVE_REQUEST_PATH, body)
-    except ApiError as e:
-        _err(f"Rippling rejected the request: HTTP {e.status}\n{e.body[:2000]}")
+    res = _post_write(c, rp.LEAVE_REQUEST_PATH, body)
     res = res if isinstance(res, dict) else {}
     typer.echo(
         f"Sent. Request {res.get('id', '?')}: {res.get('startDate', d0)} to {res.get('endDate', d1)}, "
@@ -247,6 +259,6 @@ def main() -> None:
     except auth.AuthError as e:
         typer.secho(f"Error: {e}", fg="red", err=True)
         sys.exit(1)
-    except ApiError as e:
+    except (ApiError, TransportError) as e:
         typer.secho(f"Error: {e}", fg="red", err=True)
         sys.exit(1)

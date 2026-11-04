@@ -33,6 +33,10 @@ rippling hours today 09:00 18:00 --break 12:00-13:00
 rippling vacation 2026-12-21 2026-12-23 --reason "Winter break"
 ```
 
+**Status: early.** Reading balances is verified against the live API. The write payloads
+(`hours`, `vacation`) mirror what the web app's code sends but haven't been confirmed by a live
+submission yet; check the result in the web app after your first writes.
+
 **Writes are dry-run by default.** `hours` and `vacation` print exactly what they would send
 and ask before sending. Without a terminal (scripts, agents) they stop after the dry-run;
 pass `--yes` to send.

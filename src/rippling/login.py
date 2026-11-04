@@ -23,11 +23,9 @@ HELIUM = Path("/Applications/Helium.app/Contents/MacOS/Helium")
 READ_STORAGE_JS = """JSON.stringify({
   path: location.pathname,
   access_token: localStorage.getItem('access_token'),
-  refresh_token: localStorage.getItem('refresh_token'),
   expires_at: localStorage.getItem('expires_at'),
   company_id: localStorage.getItem('company_id'),
   role_id: localStorage.getItem('role_id'),
-  user_agent: navigator.userAgent,
 })"""
 
 
@@ -48,9 +46,14 @@ def _browser(*args: str, timeout: float = 60) -> str:
     if exe := browser_executable():
         cmd += ["--executable-path", exe]
     cmd += ["--profile", str(config_dir() / "browser-profile"), "--headed", *args]
-    r = subprocess.run(
-        cmd, check=False, capture_output=True, text=True, timeout=timeout
-    )
+    try:
+        r = subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as e:
+        raise LoginError(
+            f"agent-browser {args[0]} timed out after {timeout:g}s."
+        ) from e
     if r.returncode != 0:
         raise LoginError(
             f"agent-browser {args[0]} failed: {r.stderr.strip() or r.stdout.strip()}"
@@ -58,11 +61,29 @@ def _browser(*args: str, timeout: float = 60) -> str:
     return r.stdout.strip()
 
 
-def _read_storage() -> dict:
-    out = _browser("eval", READ_STORAGE_JS)
-    # agent-browser prints the JS return value as JSON; ours is itself a JSON string.
-    value = json.loads(out.splitlines()[-1])
-    return json.loads(value) if isinstance(value, str) else value
+def _read_storage() -> dict | None:
+    """localStorage auth keys, or None while the page can't be read (e.g. mid-redirect)."""
+    try:
+        out = _browser("eval", READ_STORAGE_JS)
+        # agent-browser prints the JS return value as JSON; ours is itself a JSON string.
+        value = json.loads(out.splitlines()[-1])
+        return json.loads(value) if isinstance(value, str) else value
+    except (LoginError, ValueError, IndexError):
+        return None
+
+
+def _credentials(s: dict | None) -> Credentials | None:
+    if not s or "/login" in (s.get("path") or ""):
+        return None
+    keys = ("access_token", "company_id", "role_id", "expires_at")
+    if not all(s.get(k) for k in keys):
+        return None
+    return Credentials(
+        access_token=s["access_token"],
+        company_id=s["company_id"],
+        role_id=s["role_id"],
+        expires_at=float(s["expires_at"]),
+    )
 
 
 def wait_for_login(
@@ -71,27 +92,14 @@ def wait_for_login(
     """Open the app and poll localStorage until a token that `verify` accepts appears."""
     if not shutil.which("agent-browser"):
         raise LoginError("agent-browser is not installed (npm i -g agent-browser).")
-    _browser("open", APP_URL)
     deadline = time.monotonic() + timeout
     announced = False
     try:
+        _browser("open", APP_URL, timeout=120)
         while time.monotonic() < deadline:
-            s = _read_storage()
-            if (
-                s.get("access_token")
-                and s.get("role_id")
-                and "/login" not in s.get("path", "")
-            ):
-                creds = Credentials(
-                    access_token=s["access_token"],
-                    refresh_token=s.get("refresh_token") or "",
-                    company_id=s["company_id"],
-                    role_id=s["role_id"],
-                    expires_at=float(s.get("expires_at") or 0),
-                    user_agent=s.get("user_agent") or "",
-                )
-                if verify(creds):
-                    return creds
+            creds = _credentials(_read_storage())
+            if creds and verify(creds):
+                return creds
             if not announced and on_wait:
                 on_wait()
                 announced = True
@@ -100,5 +108,5 @@ def wait_for_login(
     finally:
         try:
             _browser("close", timeout=30)
-        except (LoginError, subprocess.TimeoutExpired):
+        except LoginError:
             pass

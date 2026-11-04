@@ -60,10 +60,31 @@ def parse_span(value: str) -> tuple[time, time]:
 # ---------------------------------------------------------------- time entries
 
 
+def instant(day: date, t: time, tz: str) -> datetime:
+    """Local wall time in `tz` -> aware UTC datetime.
+
+    Rejects wall times that a DST change skips or repeats, instead of guessing.
+    """
+    zone = ZoneInfo(tz)
+    first = datetime.combine(day, t, tzinfo=zone)
+    if first.utcoffset() != first.replace(fold=1).utcoffset():
+        roundtrip = first.astimezone(UTC).astimezone(zone).replace(tzinfo=None)
+        kind = (
+            "does not exist"
+            if roundtrip != first.replace(tzinfo=None)
+            else "is ambiguous"
+        )
+        raise ValueError(f"{day} {t:%H:%M} {kind} in {tz} (daylight saving change).")
+    return first.astimezone(UTC)
+
+
+def to_iso(dt: datetime) -> str:
+    """UTC ISO string as JS Date.toISOString() writes it."""
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
 def utc_iso(day: date, t: time, tz: str) -> str:
-    """Local wall time in `tz` -> UTC ISO string as JS Date.toISOString() writes it."""
-    local = datetime.combine(day, t, tzinfo=ZoneInfo(tz))
-    return local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return to_iso(instant(day, t, tz))
 
 
 def local_hhmm(iso: str, tz: str) -> str:
@@ -74,8 +95,12 @@ def local_date(iso: str, tz: str) -> date:
     return datetime.fromisoformat(iso).astimezone(ZoneInfo(tz)).date()
 
 
-def minutes(a: time, b: time) -> int:
-    return (b.hour * 60 + b.minute) - (a.hour * 60 + a.minute)
+def today_in(tz: str) -> date:
+    return datetime.now(ZoneInfo(tz)).date()
+
+
+def _minutes(a: datetime, b: datetime) -> int:
+    return int((b - a).total_seconds() // 60)
 
 
 @dataclass
@@ -83,6 +108,19 @@ class BreakType:
     id: str
     name: str
     paid: bool
+
+
+def update_blocker(entry: dict) -> str | None:
+    """Why an existing entry can't be safely replaced by a plain times+breaks entry."""
+    details = entry.get("time_entry_event_details") or {}
+    shifts = details.get("job_shifts") or []
+    if len(shifts) > 1:
+        return "it has several job shifts"
+    if any(s.get("job_codes") for s in shifts):
+        return "it has job codes"
+    if not entry.get("can_mutate", True):
+        return "Rippling marks it as not editable"
+    return None
 
 
 def build_time_entry(
@@ -93,44 +131,45 @@ def build_time_entry(
     breaks: list[tuple[time, time]],
     tz: str,
     break_type: BreakType | None,
-    object_id: str | None = None,
+    existing: dict | None = None,
 ) -> dict:
-    if minutes(start, end) <= 0:
+    """CreateOrUpdateTimeEntry body. With `existing`, it replaces that entry."""
+    t0, t1 = instant(day, start, tz), instant(day, end, tz)
+    if t1 <= t0:
         raise ValueError(
             "End time must be after start time (overnight entries are not supported)."
         )
-    for bs, be in breaks:
-        if minutes(bs, be) <= 0:
-            raise ValueError(f"Break {bs:%H:%M}-{be:%H:%M} must end after it starts.")
-        if minutes(start, bs) < 0 or minutes(be, end) < 0:
+    spans = sorted((instant(day, a, tz), instant(day, b, tz), a, b) for a, b in breaks)
+    for bs, be, a, b in spans:
+        if be <= bs:
+            raise ValueError(f"Break {a:%H:%M}-{b:%H:%M} must end after it starts.")
+        if bs < t0 or be > t1:
             raise ValueError(
-                f"Break {bs:%H:%M}-{be:%H:%M} lies outside {start:%H:%M}-{end:%H:%M}."
+                f"Break {a:%H:%M}-{b:%H:%M} lies outside {start:%H:%M}-{end:%H:%M}."
             )
-    ordered = sorted(breaks)
-    for (_, prev_end), (next_start, _) in pairwise(ordered):
-        if minutes(prev_end, next_start) < 0:
+    for prev, nxt in pairwise(spans):
+        if nxt[0] < prev[1]:
             raise ValueError("Breaks overlap.")
     if breaks and break_type is None:
         raise ValueError("No break type available for manual breaks.")
 
-    start_iso, end_iso = utc_iso(day, start, tz), utc_iso(day, end, tz)
     body: dict = {}
-    if object_id:
-        body["object_id"] = object_id
+    if existing:
+        body["object_id"] = existing["id"]
     body |= {
         "role_id": role_id,
-        "start_time": start_iso,
-        "end_time": end_iso,
+        "start_time": to_iso(t0),
+        "end_time": to_iso(t1),
         # Existing entries store one job shift spanning the entry; mirror that.
-        "job_shifts": [{"start_time": start_iso, "end_time": end_iso}],
+        "job_shifts": [{"start_time": to_iso(t0), "end_time": to_iso(t1)}],
         "breaks": [
             {
-                "start_time": utc_iso(day, bs, tz),
-                "end_time": utc_iso(day, be, tz),
+                "start_time": to_iso(bs),
+                "end_time": to_iso(be),
                 "company_break_type_id": break_type.id,
-                "duration_minutes": minutes(bs, be),
+                "duration_minutes": _minutes(bs, be),
             }
-            for bs, be in ordered
+            for bs, be, _, _ in spans
         ],
         "shift_input_values": [],
         "comments": [],
@@ -139,19 +178,23 @@ def build_time_entry(
         "missing_break_justifications": [],
         "override_minimum_shift_engagement": False,
     }
+    if existing:
+        # Keep fields of the old entry this command doesn't manage.
+        details = existing.get("time_entry_event_details") or {}
+        for key in ("note", "schedule_id"):
+            if details.get(key):
+                body[key] = details[key]
     return body
 
 
-def worked_minutes(
-    start: time,
-    end: time,
-    breaks: list[tuple[time, time]],
-    break_type: BreakType | None,
-) -> int:
-    unpaid = (
-        0 if (break_type and break_type.paid) else sum(minutes(a, b) for a, b in breaks)
+def worked_minutes(body: dict, paid_breaks: bool) -> int:
+    """Worked minutes of a time-entry body (elapsed time, so DST-safe)."""
+    total = _minutes(
+        datetime.fromisoformat(body["start_time"]),
+        datetime.fromisoformat(body["end_time"]),
     )
-    return minutes(start, end) - unpaid
+    unpaid = 0 if paid_breaks else sum(b["duration_minutes"] for b in body["breaks"])
+    return total - unpaid
 
 
 def timezone(c: Client) -> str:
@@ -333,14 +376,27 @@ def holidays(c: Client) -> dict[date, str]:
 
 
 def validate_leave(c: Client, body: dict) -> list[str]:
-    """Rippling's own read-only form validation. Returns error messages (empty = ok)."""
+    """Rippling's own read-only form validation. Returns error messages (empty = ok).
+
+    Fails closed: any response shape other than the known success forms is an error.
+    """
     res = c.post("/pto/api/leave_requests/validate_request/", {"leaveRequest": body})
+    return validation_errors(res)
+
+
+def validation_errors(res: object) -> list[str]:
     if res is True:
         return []
-    errors = res.get("error", []) if isinstance(res, dict) else []
+    items = res.get("error") if isinstance(res, dict) else None
+    if (
+        not isinstance(items, list)
+        or not items
+        or not all(isinstance(e, dict) for e in items)
+    ):
+        return [f"Unexpected validation response: {str(res)[:200]}"]
     return [
-        e.get("message") or e.get("error_code", "?")
-        for e in errors
+        e.get("message") or e.get("error_code") or "unknown error"
+        for e in items
         if e.get("error_code") != "SUCCESS"
     ]
 

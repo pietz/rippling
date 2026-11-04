@@ -18,6 +18,13 @@ class ApiError(Exception):
         super().__init__(f"HTTP {status} from {path}: {body[:500]}")
 
 
+class TransportError(Exception):
+    """No usable response (network failure, timeout, unparseable body).
+
+    For a write this means the outcome is unknown: it may or may not have been applied.
+    """
+
+
 class Client:
     def __init__(self, creds: Credentials):
         self.creds = creds
@@ -34,12 +41,20 @@ class Client:
         )
 
     def request(self, method: str, path: str, **kwargs: Any) -> Any:
-        r = self.session.request(method, BASE + path, timeout=30, **kwargs)
+        try:
+            r = self.session.request(method, BASE + path, timeout=30, **kwargs)
+        except requests.RequestsError as e:
+            raise TransportError(f"{method} {path}: {e}") from e
         if r.status_code == 401:
             raise AuthError("Rippling rejected the token. Run `rippling login`.")
         if r.status_code >= 400:
             raise ApiError(r.status_code, r.text, path)
-        return r.json() if r.content else None
+        if not r.content:
+            return None
+        try:
+            return r.json()
+        except ValueError as e:
+            raise TransportError(f"{method} {path}: response is not JSON") from e
 
     def get(self, path: str, **params: Any) -> Any:
         return self.request("GET", path, params=params)

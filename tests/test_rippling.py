@@ -58,12 +58,74 @@ def test_build_time_entry_create():
     ]
 
 
-def test_build_time_entry_update_sets_object_id_first():
+def test_build_time_entry_update_sets_object_id_and_keeps_note():
+    old = {
+        "id": "e1",
+        "time_entry_event_details": {"note": "Offsite", "schedule_id": None},
+    }
     body = rp.build_time_entry(
-        "role", date(2026, 11, 4), time(9), time(17), [], TZ, None, object_id="e1"
+        "role", date(2026, 11, 4), time(9), time(17), [], TZ, None, existing=old
     )
     assert next(iter(body)) == "object_id" and body["object_id"] == "e1"
+    assert body["note"] == "Offsite" and "schedule_id" not in body
     assert body["breaks"] == []
+
+
+@pytest.mark.parametrize(
+    "t, kind",
+    [(time(2, 30), "does not exist"), (time(2, 0), "does not exist")],
+)
+def test_spring_forward_gap_is_rejected(t, kind):
+    with pytest.raises(ValueError, match=kind):
+        rp.utc_iso(date(2026, 3, 29), t, TZ)
+
+
+def test_fall_back_repeated_hour_is_rejected():
+    with pytest.raises(ValueError, match="ambiguous"):
+        rp.utc_iso(date(2026, 10, 25), time(2, 30), TZ)
+
+
+def test_worked_minutes_uses_elapsed_time_across_dst():
+    # 01:00-04:00 on the spring-forward day is 2 real hours, not 3.
+    body = rp.build_time_entry("r", date(2026, 3, 29), time(1), time(4), [], TZ, None)
+    assert rp.worked_minutes(body, paid_breaks=False) == 120
+
+
+@pytest.mark.parametrize(
+    "entry, blocked",
+    [
+        ({"time_entry_event_details": {"job_shifts": [{"start_time": "x"}]}}, False),
+        ({"time_entry_event_details": {"job_shifts": [{}, {}]}}, True),
+        (
+            {
+                "time_entry_event_details": {
+                    "job_shifts": [{"job_codes": [{"id": "j"}]}]
+                }
+            },
+            True,
+        ),
+        ({"can_mutate": False}, True),
+    ],
+)
+def test_update_blocker(entry, blocked):
+    assert (rp.update_blocker(entry) is not None) == blocked
+
+
+@pytest.mark.parametrize(
+    "res, ok",
+    [
+        (True, True),
+        ({"error": [{"error_code": "SUCCESS", "success_message": "fine"}]}, True),
+        ({"error": [{"error_code": "PTO_ENDDATE", "message": "bad"}]}, False),
+        (False, False),
+        (None, False),
+        ({}, False),
+        ({"error": []}, False),
+        ({"detail": "something"}, False),
+    ],
+)
+def test_validation_fails_closed(res, ok):
+    assert (rp.validation_errors(res) == []) == ok
 
 
 @pytest.mark.parametrize(
@@ -85,10 +147,11 @@ def test_build_time_entry_rejects_bad_input(start, end, breaks):
 
 
 def test_worked_minutes_unpaid_vs_paid_break():
-    spans = [(time(12), time(13))]
-    assert rp.worked_minutes(time(9), time(18), spans, LUNCH) == 480
-    paid = rp.BreakType(id="p", name="Paid", paid=True)
-    assert rp.worked_minutes(time(9), time(18), spans, paid) == 540
+    body = rp.build_time_entry(
+        "r", date(2026, 11, 4), time(9), time(18), [(time(12), time(13))], TZ, LUNCH
+    )
+    assert rp.worked_minutes(body, paid_breaks=False) == 480
+    assert rp.worked_minutes(body, paid_breaks=True) == 540
 
 
 def test_working_days_skips_weekends_and_holidays():

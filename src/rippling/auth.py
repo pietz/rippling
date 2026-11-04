@@ -19,8 +19,6 @@ class Credentials:
     company_id: str
     role_id: str
     expires_at: float
-    refresh_token: str = ""
-    user_agent: str = ""
 
     @property
     def expired(self) -> bool:
@@ -51,7 +49,8 @@ def load() -> Credentials:
     path = credentials_path()
     if not path.exists():
         raise AuthError("Not logged in. Run `rippling login`.")
-    creds = Credentials(**json.loads(path.read_text()))
+    data = json.loads(path.read_text())
+    creds = Credentials(**{k: data[k] for k in Credentials.__dataclass_fields__})
     if creds.expired:
         raise AuthError("Rippling token expired. Run `rippling login`.")
     return creds
