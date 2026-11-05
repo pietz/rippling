@@ -333,10 +333,6 @@ def test_hours_delete_interactive_confirm(fake, monkeypatch, answer, sends):
         ([_entry("e1"), _entry("e2")], "already has 2 entries"),
         ([_entry("e1", can_mutate=False)], "editable"),
         (
-            [_entry("e1", approval_status="TIME_ENTRY_APPROVAL_STATUS_APPROVED")],
-            "already approved",
-        ),
-        (
             [
                 _entry(
                     "e1",
@@ -599,3 +595,11 @@ def test_leave_ics(fake, monkeypatch, tmp_path):
     assert result.exit_code == 0 and "Wrote 2 events" in result.output
     assert out.read_bytes().count(b"BEGIN:VEVENT") == 2
     assert fake.sent == []
+
+
+def test_hours_delete_previews_approved_entry(fake, monkeypatch):
+    approved = _entry("e1", approval_status="TIME_ENTRY_APPROVAL_STATUS_APPROVED")
+    monkeypatch.setattr(rp, "entries_on", lambda c, d, tz: [approved])
+    result = CliRunner().invoke(cli.app, DELETE)
+    assert result.exit_code == 0, result.output
+    assert "already approved" in result.output and not fake.sent

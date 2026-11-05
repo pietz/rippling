@@ -137,14 +137,6 @@ def update_blocker(entry: dict, tz: str) -> str | None:
     return None
 
 
-def delete_blocker(entry: dict, tz: str) -> str | None:
-    """Why an existing entry shouldn't be deleted from here: the replace rules, plus
-    approved entries (removing one changes hours that are already signed off)."""
-    if entry.get("approval_status") == "TIME_ENTRY_APPROVAL_STATUS_APPROVED":
-        return "it's already approved"
-    return update_blocker(entry, tz)
-
-
 def build_delete(entry: dict, comment: str | None = None) -> dict:
     """DeleteTimeEntry body for an entry from the event list."""
     return {"id": entry["id"], "comment": comment or ""}

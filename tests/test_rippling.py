@@ -674,11 +674,7 @@ def test_leave_history_is_oldest_first_per_policy():
     assert nxt["expires"] == "2028-03-31"
 
 
-def test_delete_blocker_adds_approved_to_the_replace_rules():
-    assert rp.delete_blocker(_ev(), TZ) is None
-    approved = _ev(approval_status="TIME_ENTRY_APPROVAL_STATUS_APPROVED")
-    assert "approved" in rp.delete_blocker(approved, TZ)
-    assert "editable" in rp.delete_blocker(_ev(can_mutate=False), TZ)
+def test_build_delete():
     assert rp.build_delete(_ev(), None) == {"id": "e1", "comment": ""}
     assert rp.build_delete(_ev(), "wrong day") == {"id": "e1", "comment": "wrong day"}
 

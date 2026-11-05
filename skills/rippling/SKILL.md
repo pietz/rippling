@@ -24,7 +24,7 @@ rippling people search "jane engineering" --json
 
 ## Gotchas
 
-- `hours log` replaces that day's existing entry completely; check `hours week` first. It refuses days it can't replace safely (several entries, attachments, comments, overnight shifts): the user edits those in the web app. `hours delete` removes the day's entry with the same checks (and refuses approved entries).
+- `hours log` replaces that day's existing entry completely; check `hours week` first. It refuses days it can't replace safely (several entries, attachments, comments, overnight shifts): the user edits those in the web app. `hours delete` removes the day's entry with the same checks; the preview notes when the entry is already approved.
 - Dates `YYYY-MM-DD`, `today` or `yesterday`; local 24h times; prefer `--json` when parsing.
 - `leave request` uses the "Annual Leave Policy"; other policies via `--policy "<name from leave balance>"`.
 - "Run `rippling login`" means the ~30-day token expired. Login opens a browser where the user types password and 2FA themselves: ask them to run it.

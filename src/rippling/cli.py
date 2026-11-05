@@ -253,8 +253,7 @@ def _single_entry(c: Client, d: date, tz: str, verb: str = "replace") -> dict | 
             f"{d} already has {len(existing)} entries ({listed}). Edit them in the web app."
         )
     old = existing[0] if existing else None
-    blocker = rp.delete_blocker if verb == "delete" else rp.update_blocker
-    if old and (why := blocker(old, tz) or rp.unmanaged_data(c, old)):
+    if old and (why := rp.update_blocker(old, tz) or rp.unmanaged_data(c, old)):
         raise ValueError(
             f"Won't {verb} the entry on {d} ({rp.describe_entry(old, tz)}): {why}. "
             "Edit it in the web app."
@@ -349,6 +348,11 @@ def hours_delete(
     body = rp.build_delete(old, comment)
     typer.echo(f"Delete time entry for {d:%a %Y-%m-%d} ({tz})")
     typer.echo(f"  now:  {rp.describe_entry(old, tz)}")
+    if old.get("approval_status") == "TIME_ENTRY_APPROVAL_STATUS_APPROVED":
+        typer.secho(
+            "  note: this entry is already approved; deleting it removes approved hours.",
+            fg="yellow",
+        )
 
     if not _send_or_dry_run("POST", rp.DELETE_ENTRY_PATH, body, yes):
         return

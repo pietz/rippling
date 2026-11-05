@@ -51,8 +51,8 @@ trying again.
   (times and breaks), and checks the day again right before sending. It refuses to touch what
   it can't carry over (several entries on the day, job codes, attachments, comments, custom
   inputs, overnight shifts, locked entries) and days outside Rippling's current pay periods.
-- `hours delete` removes a day's single entry, with the same checks as `hours log`; it also
-  refuses entries that are already approved.
+- `hours delete` removes a day's single entry, with the same checks as `hours log`. Like
+  `hours log`, it works on approved entries; the preview says when an entry is approved.
 - `leave request` uses the Annual Leave Policy (`--policy` picks another), end date inclusive,
   and runs Rippling's own validation first. Sending notifies your approver.
 
