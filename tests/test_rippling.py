@@ -407,3 +407,297 @@ class ForecastClient:
 def test_forecast_days_tolerates_partial_answers(res, expected):
     got = rp.forecast_days(ForecastClient(res), "p", {}, date(2027, 4, 1))
     assert got == expected
+
+
+def test_covering_period():
+    periods = [
+        (date(2026, 10, 26), date(2026, 11, 1)),
+        (date(2026, 11, 2), date(2026, 11, 8)),
+    ]
+    assert rp.covering_period(periods, date(2026, 11, 2)) == periods[1]
+    assert rp.covering_period(periods, date(2026, 11, 9)) is None
+
+
+def test_period_summary_id_errors():
+    c = PeriodClient([["2026-11-02", "2026-11-08"]], [])
+    assert rp.period_summary_id(c, date(2026, 11, 4)) == (
+        (date(2026, 11, 2), date(2026, 11, 8)),
+        "s1",
+    )
+    with pytest.raises(ValueError, match="no pay period covering 2026-11-20"):
+        rp.period_summary_id(c, date(2026, 11, 20))
+    c.get = lambda path, **params: (
+        {"periods": [["2026-11-02", "2026-11-08"]]}
+        if path.endswith("get_pay_periods_for_role")
+        else {"ids": []}
+    )
+    with pytest.raises(ValueError, match="no timesheet"):
+        rp.period_summary_id(c, date(2026, 11, 4))
+
+
+SUMMARY_ITEM = {
+    "id": "s1",
+    "payPeriod": {"startDate": "2026-11-02", "endDate": "2026-11-08"},
+    "timecardSummary": {
+        "total_hours": "38.5000",
+        "approved_hours": "30.0000",
+        "unapproved_hours": "8.5000",
+        "paid_hours": "0.0000",
+        "total_overtime_hours": "1.5000",
+        "total_holiday_hours": "8.0000",
+        "earning_summaries": [
+            {"name": "Regular ", "value": "37.0000", "units": "0.0000"},
+            {"name": "Overtime", "value": "1.5000", "units": "0.0000"},
+            {"name": "Bonus", "value": "0.0000", "units": "0.0000"},
+        ],
+        "entry_alerts": [{"message": "Missing break on Tue"}],
+        "period_alerts": ["Timecard not submitted"],
+    },
+}
+
+
+def test_period_view():
+    v = rp.period_view(SUMMARY_ITEM)
+    assert v["start"] == "2026-11-02" and v["end"] == "2026-11-08"
+    assert v["hours"]["total"] == 38.5 and v["hours"]["unapproved"] == 8.5
+    assert v["hours"]["overtime"] == 1.5 and v["hours"]["holiday"] == 8.0
+    assert v["hours"]["double_overtime"] == 0.0  # absent field
+    assert v["earnings"] == [
+        {"name": "Regular", "hours": 37.0},
+        {"name": "Overtime", "hours": 1.5},
+    ]
+    assert v["alerts"] == ["Timecard not submitted", "Missing break on Tue"]
+
+
+@pytest.mark.parametrize(
+    "value, text",
+    [
+        (None, ""),
+        ("  Sign it ", "Sign it"),
+        ({"title": {"text": "Review policy"}, "id": "x"}, "Review policy"),
+        ({"other": "a", "more": ["b", ""]}, "a; b"),
+        (3, "3"),
+    ],
+)
+def test_display_text(value, text):
+    assert rp.display_text(value) == text
+
+
+def test_pb_value():
+    v = {
+        "list_value": {
+            "values": [
+                {
+                    "struct_value": {
+                        "fields": {
+                            "start_time": {"string_value": "a"},
+                            "n": {"number_value": 60.0},
+                            "paid": {"bool_value": False},
+                        }
+                    }
+                }
+            ]
+        }
+    }
+    assert rp.pb_value(v) == [{"start_time": "a", "n": 60.0, "paid": False}]
+    assert rp.pb_value({"list_value": {}}) == []
+    assert rp.pb_value({"null_value": "NULL_VALUE"}) is None
+
+
+def _fe(field, **value):
+    return {"field": field, "new_value": value}
+
+
+CHANGED_ENTRY = {
+    "id": "te1",
+    "event_times": {
+        "start_time": "2026-11-03T08:00:00Z",
+        "end_time": "2026-11-03T16:30:00Z",
+    },
+    "batch_edits": [
+        # Out of order on purpose: the view sorts by time.
+        {
+            "author_name": "Alex Example",
+            "created_at": "2026-11-04T09:00:00.000Z",
+            "source": "WEB_TIMESHEET",
+            "field_edits": [
+                _fe("endTime", string_value="2026-11-03T16:30:00+00:00"),
+                _fe("timezone", string_value="Europe/Berlin"),
+                _fe("comments", list_value={}),
+            ],
+        },
+        {
+            "author_name": "Alex Example",
+            "created_at": "2026-11-03T17:00:00.000Z",
+            "source": "WEB_TIMESHEET",
+            "field_edits": [
+                _fe("isDeleted", bool_value=False),
+                _fe("startTime", string_value="2026-11-03T08:00:00+00:00"),
+                _fe("endTime", string_value="2026-11-03T17:00:00+00:00"),
+                _fe(
+                    "breaks",
+                    list_value={
+                        "values": [
+                            {
+                                "struct_value": {
+                                    "fields": {
+                                        "start_time": {
+                                            "string_value": "2026-11-03T11:00:00+00:00"
+                                        },
+                                        "end_time": {
+                                            "string_value": "2026-11-03T11:30:00+00:00"
+                                        },
+                                    }
+                                }
+                            }
+                        ]
+                    },
+                ),
+                _fe("status", string_value="DRAFT"),
+                _fe("_activePolicy", string_value="timePolicy=x"),
+            ],
+        },
+        {
+            "created_at": "2026-11-03T17:00:01.000Z",
+            "source": "SYSTEM",
+            "action_type": "ACTION_REQUEST_APPROVAL",
+        },
+        {
+            "author_name": "Sam Manager",
+            "created_at": "2026-11-05T10:00:00.000Z",
+            "source": "WEB_TIMESHEET",
+            "field_edits": [_fe("isDeleted", bool_value=True)],
+        },
+    ],
+}
+
+
+def test_change_view():
+    v = rp.change_view(CHANGED_ENTRY, TZ)
+    assert (v["date"], v["start"], v["end"]) == ("2026-11-03", "09:00", "17:30")
+    assert [(e["at"], e["action"], e["by"]) for e in v["edits"]] == [
+        ("2026-11-03 18:00", "created", "Alex Example"),
+        ("2026-11-03 18:00", "sent for approval", "Rippling"),
+        ("2026-11-04 10:00", "changed", "Alex Example"),
+        ("2026-11-05 11:00", "deleted", "Sam Manager"),
+    ]
+    created, approval, changed, deleted = v["edits"]
+    assert created["details"] == [
+        "start 09:00",
+        "end 18:00",
+        "breaks 12:00-12:30",
+        "status draft",
+    ]
+    assert created["source"] == "web timesheet" and approval["source"] == "system"
+    assert approval["details"] == [] and deleted["details"] == []
+    assert changed["details"] == ["end 17:30", "also comments"]
+
+
+def test_change_view_shows_dates_off_the_entry_day():
+    e = {
+        "event_times": {"start_time": "2026-11-03T21:00:00Z"},
+        "batch_edits": [
+            {
+                "created_at": "2026-11-04T09:00:00Z",
+                "field_edits": [
+                    _fe("endTime", string_value="2026-11-04T05:00:00+00:00")
+                ],
+            }
+        ],
+    }
+    v = rp.change_view(e, TZ)
+    assert v["end"] is None and v["edits"][0]["by"] is None
+    assert v["edits"][0]["details"] == ["end 2026-11-04 06:00"]
+
+
+TRANSACTIONS = [
+    {
+        "leaveTypeId": "CUSTOM",
+        "transactions": [  # newest first, as Rippling sends them
+            {
+                "leavePolicy": {"id": "p1", "displayName": " Annual Leave Policy "},
+                "date": "2027-01-01",
+                "type": "LEAVE_ACCRUAL",
+                "subType": "Accrual",
+                "changeDays": "25.00000000",
+                "balanceDays": "30.50000000",
+                "explanation": "",
+                "accrualExplanation": None,
+                "expirationDate": "2028-03-31",
+            },
+            {
+                "leavePolicy": {"id": "p1", "displayName": "Annual Leave Policy"},
+                "date": "2026-06-01",
+                "type": "LEAVE_REQUEST",
+                "subType": "Vacation Jun 01 - Jun 03",
+                "changeDays": "-3.00",
+                "balanceDays": "5.49671233",
+                "explanation": "Approved",
+                "expirationDate": None,
+            },
+            {
+                "leavePolicy": {"id": "p1", "displayName": "Annual Leave Policy"},
+                "date": "2026-01-01",
+                "type": "LEAVE_ACCRUAL",
+                "subType": "Accrual",
+                "changeDays": "8.49671233",
+                "balanceDays": "8.49671233",
+                "explanation": "",
+                "accrualExplanation": "First accrual.",
+            },
+        ],
+    },
+    {"leaveTypeId": "SICK", "transactions": []},
+]
+
+
+def test_leave_history_is_oldest_first_per_policy():
+    (h,) = rp.leave_history(TRANSACTIONS)
+    assert h["policy"] == "Annual Leave Policy" and h["policy_id"] == "p1"
+    assert [t["date"] for t in h["transactions"]] == [
+        "2026-01-01",
+        "2026-06-01",
+        "2027-01-01",
+    ]
+    first, req, nxt = h["transactions"]
+    assert first == {
+        "date": "2026-01-01",
+        "type": "accrual",
+        "description": "Accrual",
+        "change_days": 8.5,
+        "balance_days": 8.5,
+        "explanation": "First accrual.",
+        "expires": None,
+    }
+    assert req["type"] == "request" and req["change_days"] == -3.0
+    assert req["explanation"] == "Approved"
+    assert nxt["expires"] == "2028-03-31"
+
+
+def test_delete_blocker_adds_approved_to_the_replace_rules():
+    assert rp.delete_blocker(_ev(), TZ) is None
+    approved = _ev(approval_status="TIME_ENTRY_APPROVAL_STATUS_APPROVED")
+    assert "approved" in rp.delete_blocker(approved, TZ)
+    assert "editable" in rp.delete_blocker(_ev(can_mutate=False), TZ)
+    assert rp.build_delete(_ev(), None) == {"id": "e1", "comment": ""}
+    assert rp.build_delete(_ev(), "wrong day") == {"id": "e1", "comment": "wrong day"}
+
+
+class SummaryClient(PeriodClient):
+    def __init__(self, items):
+        super().__init__([["2026-11-02", "2026-11-08"]], [])
+        self.items, self.params = items, None
+
+    def get(self, path, **params):
+        if path.endswith("time_entry_period_summaries_cached/"):
+            self.params = params
+            return self.items
+        return super().get(path, **params)
+
+
+def test_period_summary_fetches_the_summary_by_id():
+    c = SummaryClient([SUMMARY_ITEM])
+    assert rp.period_summary(c, date(2026, 11, 4))["hours"]["total"] == 38.5
+    assert c.params == {"ids": "s1", "page": 1, "pagination_v2": "true", "role": "r"}
+    with pytest.raises(ValueError, match="unexpected"):
+        rp.period_summary(SummaryClient({"detail": "?"}), date(2026, 11, 4))

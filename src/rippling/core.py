@@ -11,13 +11,14 @@ from datetime import UTC, date, datetime, time, timedelta
 from itertools import pairwise
 from zoneinfo import ZoneInfo
 
-from .api import Client
+from .api import TWIRP, Client
 
 ANNUAL_POLICY = "Annual Leave Policy"
 MAX_LEAVE_DAYS = 366
 INACTIVE_LEAVE = {"CANCELED", "CANCELLED", "REJECTED", "DECLINED", "DELETED"}
 
-TIME_ENTRY_PATH = "/time_products/twirp/time_products.shared.v1.TimesheetService/CreateOrUpdateTimeEntry"
+TIME_ENTRY_PATH = TWIRP + "CreateOrUpdateTimeEntry"
+DELETE_ENTRY_PATH = TWIRP + "DeleteTimeEntry"
 LEAVE_REQUEST_PATH = "/pto/api/leave_requests/"
 
 
@@ -136,6 +137,19 @@ def update_blocker(entry: dict, tz: str) -> str | None:
     return None
 
 
+def delete_blocker(entry: dict, tz: str) -> str | None:
+    """Why an existing entry shouldn't be deleted from here: the replace rules, plus
+    approved entries (removing one changes hours that are already signed off)."""
+    if entry.get("approval_status") == "TIME_ENTRY_APPROVAL_STATUS_APPROVED":
+        return "it's already approved"
+    return update_blocker(entry, tz)
+
+
+def build_delete(entry: dict, comment: str | None = None) -> dict:
+    """DeleteTimeEntry body for an entry from the event list."""
+    return {"id": entry["id"], "comment": comment or ""}
+
+
 # Entry data `hours log` can't carry over. The event list doesn't include it, so the
 # entry's detail record is checked before replacing.
 UNMANAGED_FIELDS = {
@@ -251,6 +265,12 @@ def pay_periods(c: Client) -> list[tuple[date, date]]:
     return [(date.fromisoformat(a), date.fromisoformat(b)) for a, b in data["periods"]]
 
 
+def covering_period(
+    periods: list[tuple[date, date]], day: date
+) -> tuple[date, date] | None:
+    return next(((p0, p1) for p0, p1 in periods if p0 <= day <= p1), None)
+
+
 def summary_id(c: Client, period_start: date) -> str | None:
     data = c.get(
         "/time_tracking/api/time_entry_period_summaries_cached/getAllIdsAndPageSize/",
@@ -293,7 +313,7 @@ def entries_on(c: Client, day: date, tz: str) -> list[dict]:
     an entry from the day before runs into it: neither is safe to write next to.
     """
     periods = pay_periods(c)
-    if not any(p0 <= day <= p1 for p0, p1 in periods):
+    if not covering_period(periods, day):
         raise ValueError(
             f"Rippling has no pay period covering {day} yet, so existing entries "
             "can't be checked."
@@ -441,6 +461,221 @@ def timesheet(c: Client, start: date, end: date, tz: str) -> list[Day]:
         days.append(Day(d, todays, max(0.0, scheduled - off), holiday, leave))
         d += timedelta(days=1)
     return days
+
+
+# ---------------------------------------------------------------- pay period
+
+
+def _num(v: object) -> float:
+    try:
+        return round(float(v or 0), 2)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def display_text(v: object) -> str:
+    """Readable text from an API value of loosely known shape (alerts, task titles)."""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, dict):
+        for key in (
+            "message",
+            "title",
+            "text",
+            "description",
+            "label",
+            "name",
+            "value",
+        ):
+            if text := display_text(v.get(key)):
+                return text
+        v = list(v.values())
+    if isinstance(v, list):
+        return "; ".join(t for t in map(display_text, v) if t)
+    return str(v)
+
+
+def period_summary_id(c: Client, day: date) -> tuple[tuple[date, date], str]:
+    """The pay period containing `day` and its timesheet summary id."""
+    period = covering_period(pay_periods(c), day)
+    if not period:
+        raise ValueError(f"Rippling has no pay period covering {day} yet.")
+    sid = summary_id(c, period[0])
+    if not sid:
+        raise ValueError(
+            f"Rippling has no timesheet for the pay period {period[0]} to {period[1]} yet."
+        )
+    return period, sid
+
+
+# (key, timecardSummary field), in display order
+PERIOD_HOURS = (
+    ("total", "total_hours"),
+    ("approved", "approved_hours"),
+    ("unapproved", "unapproved_hours"),
+    ("paid", "paid_hours"),
+    ("overtime", "total_overtime_hours"),
+    ("double_overtime", "total_double_overtime_hours"),
+    ("paid_time_off", "total_paid_time_off_hours"),
+    ("unpaid_time_off", "total_unpaid_time_off_hours"),
+    ("holiday", "total_holiday_hours"),
+)
+
+
+def period_view(item: dict) -> dict:
+    """A pay-period summary reduced to hours, earnings and alerts."""
+    s = item.get("timecardSummary") or {}
+    period = item.get("payPeriod") or {}
+    alerts = (s.get("period_alerts") or []) + (s.get("entry_alerts") or [])
+    return {
+        "start": period.get("startDate"),
+        "end": period.get("endDate"),
+        "hours": {key: _num(s.get(src)) for key, src in PERIOD_HOURS},
+        "earnings": [
+            {"name": (e.get("name") or "?").strip(), "hours": _num(e.get("value"))}
+            for e in s.get("earning_summaries") or []
+            if _num(e.get("value"))
+        ],
+        "alerts": [t for t in map(display_text, alerts) if t],
+    }
+
+
+def period_summary(c: Client, day: date) -> dict:
+    _, sid = period_summary_id(c, day)
+    items = c.get(
+        "/time_tracking/api/time_entry_period_summaries_cached/",
+        ids=sid,
+        page=1,
+        pagination_v2="true",
+        role=c.creds.role_id,
+    )
+    if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+        raise ValueError("Rippling sent an unexpected pay period summary.")
+    return period_view(items[0])
+
+
+# ---------------------------------------------------------------- change history
+
+
+def pb_value(v: object) -> object:
+    """A protobuf JSON Value ({"string_value": ...}, {"list_value": ...}) as plain data."""
+    if not isinstance(v, dict):
+        return v
+    if "struct_value" in v:
+        fields = (v["struct_value"] or {}).get("fields") or {}
+        return {k: pb_value(x) for k, x in fields.items()}
+    if "list_value" in v:
+        return [pb_value(x) for x in (v["list_value"] or {}).get("values") or []]
+    for key in ("string_value", "number_value", "bool_value"):
+        if key in v:
+            return v[key]
+    return None
+
+
+# Bookkeeping fields Rippling records with every edit; not shown.
+QUIET_FIELDS = {
+    "_activePolicy",
+    "timezone",
+    "attestation",
+    "isManuallyPaid",
+    "jobShifts",
+    "shiftInputGroupValues",
+    "isDeleted",
+}
+ACTIONS = {"ACTION_REQUEST_APPROVAL": "sent for approval"}
+
+
+def _clock(iso: str, day: date | None, tz: str) -> str:
+    """Local HH:MM, with the date when it isn't `day`."""
+    d, t = local_date(iso, tz), local_hhmm(iso, tz)
+    return t if d == day else f"{d} {t}"
+
+
+def edit_summary(fields: dict, day: date | None, tz: str) -> list[str]:
+    """What one batch of field edits set, in words (deletion is the caller's)."""
+    parts = []
+    for key, label in (("startTime", "start"), ("endTime", "end")):
+        if key in fields:
+            v = fields[key]
+            parts.append(f"{label} {_clock(v, day, tz)}" if v else f"{label} cleared")
+    if "breaks" in fields:
+        spans = [
+            f"{_clock(b['start_time'], day, tz)}-{_clock(b['end_time'], day, tz)}"
+            for b in fields["breaks"] or []
+            if isinstance(b, dict) and b.get("start_time") and b.get("end_time")
+        ]
+        parts.append("breaks " + ", ".join(spans) if spans else "no breaks")
+    if "status" in fields:
+        parts.append(f"status {str(fields['status']).lower()}")
+    if "note" in fields:
+        parts.append(f"note {fields['note']!r}" if fields["note"] else "note removed")
+    handled = {"startTime", "endTime", "breaks", "status", "note"}
+    other = [k for k in fields if k not in handled and k not in QUIET_FIELDS]
+    if other:
+        parts.append("also " + ", ".join(other))
+    return parts
+
+
+def change_view(e: dict, tz: str) -> dict:
+    """One entry's edit history: who changed what, when (local time), oldest first."""
+    times = e.get("event_times") or {}
+    start, end = times.get("start_time"), times.get("end_time")
+    day = local_date(start, tz) if start else None
+    edits, created = [], False
+    for b in sorted(
+        e.get("batch_edits") or [], key=lambda b: b.get("created_at") or ""
+    ):
+        fields = {
+            f.get("field"): pb_value(f.get("new_value"))
+            for f in b.get("field_edits") or []
+        }
+        if fields:
+            if fields.get("isDeleted") is True:
+                action = "deleted"
+            else:
+                action = "changed" if created else "created"
+            created = True
+            details = edit_summary(fields, day, tz)
+        elif b.get("action_type"):
+            kind = b["action_type"]
+            action, details = ACTIONS.get(kind, kind.lower().replace("_", " ")), []
+        else:
+            continue
+        source = b.get("source") or ""
+        by = b.get("author_name") or (b.get("author") or {}).get("full_name")
+        at = b.get("created_at")
+        local = datetime.fromisoformat(at).astimezone(ZoneInfo(tz)) if at else None
+        edits.append(
+            {
+                "at": f"{local:%Y-%m-%d %H:%M}" if local else None,
+                "action": action,
+                "by": by or ("Rippling" if source == "SYSTEM" else None),
+                "source": source.lower().replace("_", " ") or None,
+                "details": details,
+            }
+        )
+    return {
+        "id": e.get("id"),
+        "date": day.isoformat() if day else None,
+        "start": local_hhmm(start, tz) if start else None,
+        "end": local_hhmm(end, tz) if end else None,
+        "edits": edits,
+    }
+
+
+def change_history(
+    c: Client, day: date, tz: str
+) -> tuple[tuple[date, date], list[dict]]:
+    """The pay period containing `day` and the recorded edits of its entries."""
+    period, sid = period_summary_id(c, day)
+    res = c.twirp("ListSummaryChangeHistory", {"summary_id": sid}) or {}
+    entries = sorted(
+        res.get("time_entries") or [],
+        key=lambda e: (e.get("event_times") or {}).get("start_time") or "",
+    )
+    return period, [change_view(e, tz) for e in entries]
 
 
 # ---------------------------------------------------------------- leave
@@ -653,3 +888,46 @@ def forecast_days(c: Client, policy_id: str, balance: dict, on: date) -> float |
         return float(res["balanceDays"])
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def leave_transactions(c: Client) -> list[dict]:
+    return c.post(
+        "/pto/api/transactions/get_transactions_for_role/",
+        {"role": c.creds.role_id, "includeUnfulfilledPaidOut": False},
+    )
+
+
+def transaction_view(t: dict) -> dict:
+    kind = (t.get("type") or "").removeprefix("LEAVE_").lower().replace("_", " ")
+    note = t.get("explanation") or t.get("accrualExplanation") or t.get("comment")
+    return {
+        "date": t.get("date"),
+        "type": kind or None,
+        "description": (t.get("subType") or "").strip() or None,
+        "change_days": _num(t.get("changeDays")),
+        "balance_days": _num(t.get("balanceDays")),
+        "explanation": (note or "").strip() or None,
+        "expires": t.get("expirationDate") or None,
+    }
+
+
+def leave_history(groups: list[dict]) -> list[dict]:
+    """Balance transactions per leave policy, oldest first.
+
+    Rippling lists them newest first, including scheduled future accruals; the order
+    is reversed rather than re-sorted so same-day rows keep their running balance.
+    """
+    out = []
+    for g in groups:
+        txs = g.get("transactions") or []
+        if not txs:
+            continue
+        policy = txs[0].get("leavePolicy") or {}
+        out.append(
+            {
+                "policy": (policy.get("displayName") or "?").strip(),
+                "policy_id": policy.get("id"),
+                "transactions": [transaction_view(t) for t in reversed(txs)],
+            }
+        )
+    return out

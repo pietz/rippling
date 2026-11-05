@@ -1,8 +1,8 @@
 """`rippling` command line.
 
-rippling login | logout | whoami | holidays
-rippling hours  log | week | month
-rippling leave  balance | request | list | cancel
+rippling login | logout | whoami | holidays | todo
+rippling hours  log | delete | week | month | period | changes
+rippling leave  balance | history | request | list | cancel | ics
 rippling people search
 """
 
@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from . import __version__, auth
+from . import __version__, auth, ics, inbox
 from . import core as rp
 from . import people as ppl
 from .api import BASE, ApiError, Client, TransportError
@@ -26,7 +27,8 @@ app = typer.Typer(
 )
 hours_app = typer.Typer(no_args_is_help=True, help="Log and review working hours.")
 leave_app = typer.Typer(
-    no_args_is_help=True, help="Vacation: balance, requests, cancelling."
+    no_args_is_help=True,
+    help="Vacation: balance, history, requests, cancelling, calendar export.",
 )
 people_app = typer.Typer(no_args_is_help=True, help="Look up colleagues.")
 app.add_typer(hours_app, name="hours")
@@ -62,7 +64,7 @@ def _root(
 ) -> None:
     """Unofficial CLI for Rippling: log hours, request vacation, check balances, find colleagues.
 
-    Writes (hours log, leave request, leave cancel) are dry-run by default: they print exactly what they would send, then ask in a terminal. Without a terminal they only send with --yes.
+    Writes (hours log, hours delete, leave request, leave cancel) are dry-run by default: they print exactly what they would send, then ask in a terminal. Without a terminal they only send with --yes.
     """
 
 
@@ -213,13 +215,36 @@ def holidays(
         typer.echo(f"{d:%a %Y-%m-%d}  {name}")
 
 
+@app.command()
+def todo(as_json: JSON = False) -> None:
+    """Show what needs your attention in Rippling's inbox. Read only: marks nothing as seen."""
+    c = _client()
+    tz = rp.timezone(c)
+    items = [inbox.item_view(i, tz) for i in inbox.need_my_attention(c)]
+    if as_json:
+        _print_json(items)
+        return
+    if not items:
+        typer.echo("Nothing needs your attention in Rippling.")
+        return
+    typer.echo(f"{len(items)} item(s) need your attention:")
+    for v in items:
+        typer.echo(f"  {v['title']}")
+        meta = [f"{key} {v[key]}" for key in ("from", "requested", "due") if v[key]]
+        if meta:
+            typer.echo(f"    {', '.join(meta)}")
+        if v["details"]:
+            typer.echo(f"    {v['details']}")
+
+
 # ---------------------------------------------------------------- hours
 
 
-def _replaceable_entry(c: Client, d: date, tz: str) -> dict | None:
-    """The day's single entry if it can be replaced safely, None if the day is empty.
+def _single_entry(c: Client, d: date, tz: str, verb: str = "replace") -> dict | None:
+    """The day's single entry if it can be replaced (or deleted) safely, None if the
+    day is empty.
 
-    Raises ValueError explaining why `hours log` must not write this day.
+    Raises ValueError explaining why `hours log` / `hours delete` must not touch this day.
     """
     existing = rp.entries_on(c, d, tz)
     if len(existing) > 1:
@@ -228,9 +253,10 @@ def _replaceable_entry(c: Client, d: date, tz: str) -> dict | None:
             f"{d} already has {len(existing)} entries ({listed}). Edit them in the web app."
         )
     old = existing[0] if existing else None
-    if old and (why := rp.update_blocker(old, tz) or rp.unmanaged_data(c, old)):
+    blocker = rp.delete_blocker if verb == "delete" else rp.update_blocker
+    if old and (why := blocker(old, tz) or rp.unmanaged_data(c, old)):
         raise ValueError(
-            f"Won't replace the entry on {d} ({rp.describe_entry(old, tz)}): {why}. "
+            f"Won't {verb} the entry on {d} ({rp.describe_entry(old, tz)}): {why}. "
             "Edit it in the web app."
         )
     return old
@@ -254,7 +280,7 @@ def hours_log(
         d = rp.parse_date(day, rp.today_in(tz))
         t0, t1 = rp.parse_time(start), rp.parse_time(end)
         spans = [rp.parse_span(b) for b in breaks or []]
-        old = _replaceable_entry(c, d, tz)
+        old = _single_entry(c, d, tz)
         break_type = rp.manual_break_type(c) if spans else None
         body = rp.build_time_entry(
             c.creds.role_id, d, t0, t1, spans, tz, break_type, old
@@ -278,7 +304,7 @@ def hours_log(
         return
     # The day may have changed since the preview (web app, another run): check again.
     try:
-        now = _replaceable_entry(c, d, tz)
+        now = _single_entry(c, d, tz)
     except ValueError as e:
         _err(f"{e} Nothing sent.")
     if now != old:
@@ -300,6 +326,52 @@ def hours_log(
         typer.secho(
             "  Read-back found no entry for that day. Check the web app.", fg="yellow"
         )
+
+
+@hours_app.command("delete")
+def hours_delete(
+    day: Annotated[str, typer.Argument(help="YYYY-MM-DD, 'today' or 'yesterday'.")],
+    comment: Annotated[
+        str | None, typer.Option(help="Optional comment stored with the deletion.")
+    ] = None,
+    yes: YES = False,
+) -> None:
+    """Delete the time entry of one day (the undo for `hours log`)."""
+    c = _client()
+    try:
+        tz = rp.timezone(c)
+        d = rp.parse_date(day, rp.today_in(tz))
+        old = _single_entry(c, d, tz, "delete")
+    except ValueError as e:
+        _err(str(e))
+    if not old:
+        _err(f"{d} has no time entry. Nothing to delete.")
+    body = rp.build_delete(old, comment)
+    typer.echo(f"Delete time entry for {d:%a %Y-%m-%d} ({tz})")
+    typer.echo(f"  now:  {rp.describe_entry(old, tz)}")
+
+    if not _send_or_dry_run("POST", rp.DELETE_ENTRY_PATH, body, yes):
+        return
+    # The day may have changed since the preview (web app, another run): check again.
+    try:
+        now = _single_entry(c, d, tz, "delete")
+    except ValueError as e:
+        _err(f"{e} Nothing sent.")
+    if now != old:
+        _err(
+            f"The entries on {d} changed since the preview. Nothing sent; run it again."
+        )
+    _post_write(c, rp.DELETE_ENTRY_PATH, body)
+    typer.echo("Sent.")
+    try:
+        after = rp.entries_on(c, d, tz)
+    except (ApiError, TransportError, ValueError) as e:
+        typer.secho(f"  Sent, but reading it back failed ({e}).", fg="yellow")
+        return
+    for e in after:
+        typer.secho(f"  Still there: {rp.describe_entry(e, tz)}", fg="yellow")
+    if not after:
+        typer.echo(f"  {d} now has no entries.")
 
 
 def _show_timesheet(
@@ -401,6 +473,80 @@ def hours_month(
     _show_timesheet(f"{first:%B %Y}", days, tz, as_json, True)
 
 
+DAY_IN_PERIOD = Annotated[
+    str,
+    typer.Argument(
+        help="Any day in the pay period: YYYY-MM-DD, 'today' or 'yesterday'."
+    ),
+]
+
+
+def _day_arg(c: Client, day: str) -> tuple[str, date]:
+    tz = rp.timezone(c)
+    try:
+        return tz, rp.parse_date(day, rp.today_in(tz))
+    except ValueError as e:
+        _err(str(e))
+
+
+@hours_app.command("period")
+def hours_period(day: DAY_IN_PERIOD = "today", as_json: JSON = False) -> None:
+    """Show a pay period's totals: hours, approval, overtime, time off, earnings, alerts."""
+    c = _client()
+    _, d = _day_arg(c, day)
+    try:
+        p = rp.period_summary(c, d)
+    except ValueError as e:
+        _err(str(e))
+    if as_json:
+        _print_json(p)
+        return
+    typer.echo(f"Pay period {p['start']} to {p['end']}")
+    for key, h in p["hours"].items():
+        if h or key == "total":
+            typer.echo(f"  {key.replace('_', ' '):<16} {_hours(h):>8}")
+    if p["earnings"]:
+        typer.echo("Earnings")
+        width = max(16, *(len(e["name"]) for e in p["earnings"]))
+        for e in p["earnings"]:
+            typer.echo(f"  {e['name']:<{width}} {_hours(e['hours']):>8}")
+    if p["alerts"]:
+        typer.secho("Alerts", fg="yellow")
+        for a in p["alerts"]:
+            typer.secho(f"  {a}", fg="yellow")
+
+
+@hours_app.command("changes")
+def hours_changes(day: DAY_IN_PERIOD = "today", as_json: JSON = False) -> None:
+    """Show the recorded edits in a pay period: which entry, what changed, who, when."""
+    c = _client()
+    tz, d = _day_arg(c, day)
+    try:
+        (p0, p1), entries = rp.change_history(c, d, tz)
+    except ValueError as e:
+        _err(str(e))
+    if as_json:
+        _print_json({"timezone": tz, "start": p0, "end": p1, "entries": entries})
+        return
+    entries = [e for e in entries if e["edits"]]
+    if not entries:
+        typer.echo(f"No recorded changes in the pay period {p0} to {p1}.")
+        return
+    typer.echo(f"Changes in the pay period {p0} to {p1} ({tz})")
+    for e in entries:
+        label = f"{date.fromisoformat(e['date']):%a %Y-%m-%d}" if e["date"] else "?"
+        typer.echo(f"  {label}  {e['start'] or '?'}-{e['end'] or 'open'}")
+        for x in e["edits"]:
+            line = f"    {x['at'] or '?'}  {x['action']}"
+            if x["by"]:
+                line += f" by {x['by']}"
+            if x["source"] and x["source"] != "system":
+                line += f" ({x['source']})"
+            if x["details"]:
+                line += ": " + ", ".join(x["details"])
+            typer.echo(line)
+
+
 # ---------------------------------------------------------------- leave
 
 
@@ -459,6 +605,56 @@ def leave_balance(
             projected = "-" if r["forecast_days"] is None else f"{r['forecast_days']:g}"
             line += f"  {projected:>13}"
         typer.echo(line)
+
+
+@leave_app.command("history")
+def leave_history(
+    policy_name: Annotated[
+        str | None,
+        typer.Option(
+            "--policy",
+            help="Only this leave policy, as `leave balance` shows it. Default: all.",
+        ),
+    ] = None,
+    as_json: JSON = False,
+) -> None:
+    """Show how your leave balances changed: accruals, requests, carry-over, expiry."""
+    c = _client()
+    history = rp.leave_history(rp.leave_transactions(c))
+    if policy_name:
+        named = [{"policyDisplayName": h["policy"], "history": h} for h in history]
+        try:
+            history = [rp.leave_policy(named, policy_name)["history"]]
+        except ValueError as e:
+            _err(str(e))
+    if as_json:
+        _print_json(history)
+        return
+    if not history:
+        typer.echo("No leave balance changes.")
+        return
+    today = rp.today_in(rp.timezone(c)).isoformat()
+    for i, h in enumerate(history):
+        if i:
+            typer.echo("")
+        typer.echo(h["policy"])
+        typer.echo(
+            f"  {'Date':<10}  {'Type':<8}  {'Change':>7}  {'Balance':>7}  Description"
+        )
+        upcoming = False
+        for t in h["transactions"]:
+            if not upcoming and (t["date"] or "") > today:
+                upcoming = True
+                typer.echo("  upcoming:")
+            desc = t["description"] or ""
+            if t["expires"]:
+                desc += f" (expires {t['expires']})"
+            typer.echo(
+                f"  {t['date'] or '?':<10}  {t['type'] or '':<8}  {t['change_days']:>+7g}"
+                f"  {t['balance_days']:>7g}  {desc}".rstrip()
+            )
+            if t["explanation"]:
+                typer.echo(f"{'':<42}{t['explanation']}")
 
 
 @leave_app.command("request")
@@ -593,6 +789,23 @@ def leave_cancel(
         typer.echo(f"Status now: {after.get('status')}. Check the web app to be sure.")
     except (ApiError, TransportError, ValueError) as e:
         typer.secho(f"Sent, but reading it back failed ({e}).", fg="yellow")
+
+
+@leave_app.command("ics")
+def leave_ics(
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Write to this file instead of stdout."),
+    ] = None,
+) -> None:
+    """Export your leave (approved and pending) and holidays as an iCalendar file."""
+    c = _client()
+    text, count = ics.calendar(rp.leave_requests(c), rp.holidays(c), datetime.now(UTC))
+    if output is None:
+        typer.echo(text.encode(), nl=False)
+        return
+    output.write_bytes(text.encode())
+    typer.echo(f"Wrote {count} events to {output}.")
 
 
 # ---------------------------------------------------------------- people

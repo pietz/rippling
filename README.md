@@ -1,8 +1,8 @@
 # rippling
 
 Unofficial command-line client for [Rippling](https://www.rippling.com): log and review working
-hours, request and cancel vacation, check balances and holidays, and look up colleagues from the
-terminal.
+hours, request and cancel vacation, check balances and holidays, see what's waiting in your inbox,
+and look up colleagues from the terminal.
 
 ## Install
 
@@ -19,15 +19,21 @@ Brave, Vivaldi, Chromium or Helium). Set `RIPPLING_BROWSER` to a browser executa
 rippling login                                   # browser window: log in once, ~30 days
 
 rippling hours log today 09:00 18:00 --break 12:00-13:00
+rippling hours delete yesterday                  # undo: remove that day's entry
 rippling hours week                              # this week: entries, breaks, missing days
 rippling hours month 2026-10
+rippling hours period                            # pay period totals, overtime, alerts
+rippling hours changes 2026-10-28                # who edited which entry in that pay period
 
 rippling leave balance --on 2027-04-01           # today's balance plus a projection
+rippling leave history --policy "Annual Leave Policy"   # accruals, requests, expiry
 rippling leave request 2026-12-21 2026-12-23 --reason "Winter break"
 rippling leave list
 rippling leave cancel 1a2b3c
+rippling leave ics -o leave.ics                  # leave and holidays for your calendar
 
 rippling holidays 2027
+rippling todo                                    # inbox items that need you (marks nothing read)
 rippling people search engineering
 rippling whoami
 rippling logout                                  # delete the local token and browser profile
@@ -35,22 +41,24 @@ rippling logout                                  # delete the local token and br
 
 Every command explains itself with `--help`. Read commands take `--json` for scripts and agents.
 
-**Writes are dry-run by default.** `hours log`, `leave request` and `leave cancel` print exactly
-what they would send and ask before sending. Without a terminal (scripts, agents) they stop
-after the dry-run; pass `--yes` to send. A write is sent once and never retried; if the outcome
-is unclear (timeout, server error), the CLI says so: check before trying again.
+**Writes are dry-run by default.** `hours log`, `hours delete`, `leave request` and
+`leave cancel` print exactly what they would send and ask before sending. Without a terminal
+(scripts, agents) they stop after the dry-run; pass `--yes` to send. A write is sent once and
+never retried; if the outcome is unclear (timeout, server error), the CLI says so: check before
+trying again.
 
 - `hours log` sets one day: it creates the entry or replaces that day's existing one completely
-  (times and breaks), and checks the day again right before sending. It can't delete entries.
-  It refuses to touch what it can't carry over (several entries on the day, job codes,
-  attachments, comments, custom inputs, overnight shifts, locked entries) and days outside
-  Rippling's current pay periods.
+  (times and breaks), and checks the day again right before sending. It refuses to touch what
+  it can't carry over (several entries on the day, job codes, attachments, comments, custom
+  inputs, overnight shifts, locked entries) and days outside Rippling's current pay periods.
+- `hours delete` removes a day's single entry, with the same checks as `hours log`; it also
+  refuses entries that are already approved.
 - `leave request` uses the Annual Leave Policy (`--policy` picks another), end date inclusive,
   and runs Rippling's own validation first. Sending notifies your approver.
 
-**Status: early.** Reads and `hours log` are verified against the live API. `leave request`
-and `leave cancel` mirror what the web app's code sends but haven't been confirmed by a live
-submission yet; check the result in the web app after first use.
+**Status: early.** Reads and `hours log` are verified against the live API. `hours delete`,
+`leave request` and `leave cancel` mirror what the web app's code sends but haven't been
+confirmed by a live submission yet; check the result in the web app after first use.
 
 ## How auth works
 

@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 from rippling import cli
 from rippling import core as rp
-from rippling.api import TransportError
+from rippling.api import ApiError, TransportError
 from rippling.auth import Credentials
 
 
@@ -276,3 +276,326 @@ def test_leave_today_is_the_rippling_timezone_date(fake, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert fake.sent[0][1]["startDate"] == "2026-12-21"
+
+
+# ---------------------------------------------------------------- hours delete
+
+DELETE = ["hours", "delete", "2026-11-04"]
+DELETE_PATH = (
+    "/time_products/twirp/time_products.shared.v1.TimesheetService/DeleteTimeEntry"
+)
+
+
+def _days(monkeypatch, *states):
+    """entries_on answers: preview, recheck, read-back."""
+    answers = iter(states)
+    monkeypatch.setattr(rp, "entries_on", lambda c, d, tz: next(answers))
+
+
+def test_hours_delete_dry_run_by_default(fake, monkeypatch):
+    monkeypatch.setattr(rp, "entries_on", lambda c, d, tz: [_entry("e1")])
+    result = CliRunner().invoke(cli.app, [*DELETE, "--comment", "wrong day"])
+    assert result.exit_code == 0, result.output
+    assert "Delete time entry for Wed 2026-11-04" in result.output
+    assert "09:00-18:00" in result.output and DELETE_PATH in result.output
+    assert '"comment": "wrong day"' in result.output
+    assert "Dry run: nothing sent" in result.output
+    assert fake.sent == []
+
+
+def test_hours_delete_yes_sends_exactly_once(fake, monkeypatch):
+    _days(monkeypatch, [_entry("e1")], [_entry("e1")], [])
+    result = CliRunner().invoke(cli.app, [*DELETE, "--yes"])
+    assert result.exit_code == 0, result.output
+    assert fake.sent == [(DELETE_PATH, {"id": "e1", "comment": ""})]
+    assert "now has no entries" in result.output
+
+
+def test_hours_delete_warns_when_read_back_still_finds_it(fake, monkeypatch):
+    _days(monkeypatch, [_entry("e1")], [_entry("e1")], [_entry("e1")])
+    result = CliRunner().invoke(cli.app, [*DELETE, "--yes"])
+    assert result.exit_code == 0 and "Still there" in result.output
+    assert len(fake.sent) == 1
+
+
+@pytest.mark.parametrize("answer, sends", [("n\n", 0), ("y\n", 1), ("", 0)])
+def test_hours_delete_interactive_confirm(fake, monkeypatch, answer, sends):
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr(rp, "entries_on", lambda c, d, tz: [_entry("e1")])
+    result = CliRunner().invoke(cli.app, DELETE, input=answer)
+    assert len(fake.sent) == sends, result.output
+
+
+@pytest.mark.parametrize(
+    "entries, message",
+    [
+        ([], "has no time entry"),
+        ([_entry("e1"), _entry("e2")], "already has 2 entries"),
+        ([_entry("e1", can_mutate=False)], "editable"),
+        (
+            [_entry("e1", approval_status="TIME_ENTRY_APPROVAL_STATUS_APPROVED")],
+            "already approved",
+        ),
+        (
+            [
+                _entry(
+                    "e1",
+                    event_times={
+                        "start_time": "2026-11-04T21:00:00Z",
+                        "end_time": "2026-11-05T05:00:00Z",
+                    },
+                )
+            ],
+            "past midnight",
+        ),
+        (
+            [_entry("e1", time_entry_event_details={"job_shifts": [{}, {}]})],
+            "several job shifts",
+        ),
+    ],
+)
+def test_hours_delete_refuses(fake, monkeypatch, entries, message):
+    monkeypatch.setattr(rp, "entries_on", lambda c, d, tz: entries)
+    result = CliRunner().invoke(cli.app, [*DELETE, "--yes"])
+    assert result.exit_code == 1 and message in result.output
+    assert fake.sent == []
+
+
+def test_hours_delete_refuses_unmanaged_data(fake, monkeypatch):
+    monkeypatch.setattr(rp, "entries_on", lambda c, d, tz: [_entry("e1")])
+    monkeypatch.setattr(rp, "unmanaged_data", lambda c, e: "it has attachments")
+    result = CliRunner().invoke(cli.app, [*DELETE, "--yes"])
+    assert result.exit_code == 1 and "attachments" in result.output
+    assert "Won't delete the entry on 2026-11-04" in result.output
+    assert fake.sent == []
+
+
+def test_hours_delete_refuses_days_without_pay_period(fake, monkeypatch):
+    def no_period(c, d, tz):
+        raise ValueError(f"Rippling has no pay period covering {d} yet.")
+
+    monkeypatch.setattr(rp, "entries_on", no_period)
+    result = CliRunner().invoke(cli.app, [*DELETE, "--yes"])
+    assert result.exit_code == 1 and "no pay period" in result.output
+    assert fake.sent == []
+
+
+@pytest.mark.parametrize(
+    "recheck",
+    [
+        [],  # deleted elsewhere
+        [_entry("e2")],  # replaced elsewhere
+        [
+            _entry(
+                "e1",
+                event_times={
+                    "start_time": "2026-11-04T07:00:00Z",
+                    "end_time": "2026-11-04T17:00:00Z",
+                },
+            )
+        ],
+    ],
+)
+def test_hours_delete_rechecks_before_sending(fake, monkeypatch, recheck):
+    _days(monkeypatch, [_entry("e1")], recheck)
+    result = CliRunner().invoke(cli.app, [*DELETE, "--yes"])
+    assert result.exit_code == 1
+    assert "changed since the preview. Nothing sent" in result.output
+    assert fake.sent == []
+
+
+def test_hours_delete_recheck_refusal_sends_nothing(fake, monkeypatch):
+    locked = _entry("e1", can_mutate=False)
+    _days(monkeypatch, [_entry("e1")], [locked])
+    result = CliRunner().invoke(cli.app, [*DELETE, "--yes"])
+    assert result.exit_code == 1 and "Nothing sent" in result.output
+    assert fake.sent == []
+
+
+@pytest.mark.parametrize(
+    "error, message",
+    [
+        (lambda path: ApiError(502, "{}", path), "may or may not have been saved"),
+        (lambda path: TransportError("timeout"), "may or may not have been saved"),
+        (lambda path: ApiError(400, "bad id", path), "rejected"),
+    ],
+)
+def test_hours_delete_unknown_outcome(fake, monkeypatch, error, message):
+    monkeypatch.setattr(rp, "entries_on", lambda c, d, tz: [_entry("e1")])
+
+    def fail(path, body):
+        raise error(path)
+
+    monkeypatch.setattr(fake, "post", fail)
+    result = CliRunner().invoke(cli.app, [*DELETE, "--yes"])
+    assert result.exit_code == 1 and message in result.output
+
+
+# ---------------------------------------------------------------- reads
+
+
+def test_hours_period_omits_zero_lines(fake, monkeypatch):
+    view = {
+        "start": "2026-11-02",
+        "end": "2026-11-08",
+        "hours": {"total": 38.5, "approved": 30.0, "unapproved": 8.5, "paid": 0.0},
+        "earnings": [{"name": "Regular", "hours": 38.5}],
+        "alerts": ["Missing break on Tue"],
+    }
+    monkeypatch.setattr(rp, "period_summary", lambda c, d: view)
+    result = CliRunner().invoke(cli.app, ["hours", "period", "2026-11-04"])
+    assert result.exit_code == 0, result.output
+    assert "Pay period 2026-11-02 to 2026-11-08" in result.output
+    assert "unapproved" in result.output and "paid" not in result.output
+    assert "Regular" in result.output and "Missing break on Tue" in result.output
+    result = CliRunner().invoke(cli.app, ["hours", "period", "--json"])
+    assert json.loads(result.output) == view
+
+
+def test_hours_period_without_pay_period(fake, monkeypatch):
+    monkeypatch.setattr(rp, "pay_periods", lambda c: [])
+    result = CliRunner().invoke(cli.app, ["hours", "period", "2026-11-04"])
+    assert result.exit_code == 1
+    assert "no pay period covering 2026-11-04" in result.output
+
+
+def test_hours_changes(fake, monkeypatch):
+    entries = [
+        {
+            "id": "te1",
+            "date": "2026-11-03",
+            "start": "09:00",
+            "end": "17:30",
+            "edits": [
+                {
+                    "at": "2026-11-04 10:00",
+                    "action": "changed",
+                    "by": "Alex Example",
+                    "source": "web timesheet",
+                    "details": ["end 17:30"],
+                },
+                {
+                    "at": "2026-11-04 10:00",
+                    "action": "sent for approval",
+                    "by": "Rippling",
+                    "source": "system",
+                    "details": [],
+                },
+            ],
+        },
+        {"id": "te2", "date": "2026-11-04", "start": "09:00", "end": None, "edits": []},
+    ]
+    period = (date(2026, 11, 2), date(2026, 11, 8))
+    monkeypatch.setattr(rp, "change_history", lambda c, d, tz: (period, entries))
+    result = CliRunner().invoke(cli.app, ["hours", "changes"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[1] == "  Tue 2026-11-03  09:00-17:30"
+    assert lines[2] == (
+        "    2026-11-04 10:00  changed by Alex Example (web timesheet): end 17:30"
+    )
+    assert lines[3] == "    2026-11-04 10:00  sent for approval by Rippling"
+    assert "2026-11-04  09:00" not in result.output  # no edits, not listed
+    monkeypatch.setattr(rp, "change_history", lambda c, d, tz: (period, []))
+    result = CliRunner().invoke(cli.app, ["hours", "changes"])
+    assert "No recorded changes" in result.output
+
+
+def test_todo(fake, monkeypatch):
+    from rippling import inbox
+
+    monkeypatch.setattr(inbox, "need_my_attention", lambda c: [])
+    result = CliRunner().invoke(cli.app, ["todo"])
+    assert result.exit_code == 0 and "Nothing needs your attention" in result.output
+    item = {
+        "id": "i1",
+        "details": "",
+        "requested_on": "2026-11-01T10:00:00Z",
+        "requested_by": {"name": "Documents"},
+        "task_render_info": {"task_title": "Sign handbook"},
+    }
+    monkeypatch.setattr(inbox, "need_my_attention", lambda c: [item])
+    result = CliRunner().invoke(cli.app, ["todo"])
+    assert "1 item(s) need your attention" in result.output
+    assert "Sign handbook" in result.output
+    assert "from Documents, requested 2026-11-01" in result.output
+    assert "due" not in result.output
+    assert fake.sent == []
+
+
+HISTORY = [
+    {
+        "leaveTypeId": "CUSTOM",
+        "transactions": [
+            {
+                "leavePolicy": {"id": "p2", "displayName": "Sick"},
+                "date": "2026-02-01",
+                "type": "LEAVE_REQUEST",
+                "subType": "Sick day",
+                "changeDays": "-1",
+                "balanceDays": "4",
+            }
+        ],
+    },
+    {
+        "leaveTypeId": "CUSTOM",
+        "transactions": [
+            {
+                "leavePolicy": {"id": "p1", "displayName": "Annual Leave Policy"},
+                "date": "2027-01-01",
+                "type": "LEAVE_ACCRUAL",
+                "subType": "Accrual",
+                "changeDays": "25",
+                "balanceDays": "30",
+                "expirationDate": "2028-03-31",
+            },
+            {
+                "leavePolicy": {"id": "p1", "displayName": "Annual Leave Policy"},
+                "date": "2026-06-01",
+                "type": "LEAVE_REQUEST",
+                "subType": "Vacation",
+                "changeDays": "-2.5",
+                "balanceDays": "5",
+                "explanation": "Approved",
+            },
+        ],
+    },
+]
+
+
+def test_leave_history(fake, monkeypatch):
+    monkeypatch.setattr(rp, "leave_transactions", lambda c: HISTORY)
+    result = CliRunner().invoke(cli.app, ["leave", "history"])
+    assert result.exit_code == 0, result.output
+    assert "Sick" in result.output and "Annual Leave Policy" in result.output
+    result = CliRunner().invoke(
+        cli.app, ["leave", "history", "--policy", "annual leave policy"]
+    )
+    out = result.output
+    assert "Sick" not in out
+    assert "2026-06-01  request      -2.5        5  Vacation" in out
+    assert "Approved" in out
+    assert out.index("upcoming:") < out.index("2027-01-01")
+    assert "+25" in out and "(expires 2028-03-31)" in out
+    result = CliRunner().invoke(cli.app, ["leave", "history", "--policy", "Vacation"])
+    assert result.exit_code == 1 and "No leave policy named 'Vacation'" in result.output
+    result = CliRunner().invoke(cli.app, ["leave", "history", "--json"])
+    assert [h["policy"] for h in json.loads(result.output)] == [
+        "Sick",
+        "Annual Leave Policy",
+    ]
+
+
+def test_leave_ics(fake, monkeypatch, tmp_path):
+    monkeypatch.setattr(rp, "leave_requests", lambda c: [LEAVE])
+    result = CliRunner().invoke(cli.app, ["leave", "ics"])
+    assert result.exit_code == 0, result.output
+    raw = result.stdout_bytes
+    assert raw.startswith(b"BEGIN:VCALENDAR\r\n") and raw.endswith(b"END:VCALENDAR\r\n")
+    assert b"SUMMARY:Annual Leave Policy (pending)\r\n" in raw
+    assert b"SUMMARY:Christmas Eve\r\n" in raw
+    out = tmp_path / "leave.ics"
+    result = CliRunner().invoke(cli.app, ["leave", "ics", "-o", str(out)])
+    assert result.exit_code == 0 and "Wrote 2 events" in result.output
+    assert out.read_bytes().count(b"BEGIN:VEVENT") == 2
+    assert fake.sent == []
