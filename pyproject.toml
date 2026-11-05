@@ -1,6 +1,6 @@
 [project]
 name = "rippling"
-version = "0.3.0"
+version = "0.4.0"
 description = "Unofficial CLI for Rippling: log and review hours, request vacation, check balances, find colleagues. Not affiliated with Rippling."
 readme = "README.md"
 authors = [
