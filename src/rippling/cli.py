@@ -62,7 +62,7 @@ def _root(
 ) -> None:
     """Unofficial CLI for Rippling: log hours, request vacation, check balances, find colleagues.
 
-    Writes (hours log, leave request, leave cancel) are dry-run by default: they print exactly what they would send and ask before sending.
+    Writes (hours log, leave request, leave cancel) are dry-run by default: they print exactly what they would send, then ask in a terminal. Without a terminal they only send with --yes.
     """
 
 
@@ -94,12 +94,21 @@ def _post_write(c: Client, path: str, body: dict) -> object:
     try:
         return c.post(path, body)
     except ApiError as e:
+        if e.status >= 500:  # a server error can come after the write was saved
+            _err(
+                f"Rippling answered with a server error (HTTP {e.status}). It may or "
+                "may not have been saved. Check before retrying."
+            )
         _err(f"Rippling rejected it: HTTP {e.status}\n{e.body[:2000]}")
     except TransportError as e:
         _err(
             f"No clear answer from Rippling ({e}). It may or may not have been saved. "
             "Check before retrying."
         )
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty()
 
 
 def _send_or_dry_run(method: str, path: str, body: dict, yes: bool) -> bool:
@@ -109,7 +118,7 @@ def _send_or_dry_run(method: str, path: str, body: dict, yes: bool) -> bool:
     typer.echo("")
     if yes:
         return True
-    if not sys.stdin.isatty():
+    if not _interactive():
         typer.echo(
             "Dry run: nothing sent. To send it, re-run with --yes "
             "(agents: only after the user explicitly approves)."
@@ -136,7 +145,7 @@ def login(
         try:
             rp.timezone(Client(creds))
             return True
-        except (auth.AuthError, ApiError, TransportError):
+        except (auth.AuthError, ApiError, TransportError, KeyError, TypeError):
             return False
 
     typer.echo("Opening Rippling in a browser window...")
@@ -207,6 +216,26 @@ def holidays(
 # ---------------------------------------------------------------- hours
 
 
+def _replaceable_entry(c: Client, d: date, tz: str) -> dict | None:
+    """The day's single entry if it can be replaced safely, None if the day is empty.
+
+    Raises ValueError explaining why `hours log` must not write this day.
+    """
+    existing = rp.entries_on(c, d, tz)
+    if len(existing) > 1:
+        listed = "; ".join(rp.describe_entry(e, tz) for e in existing)
+        raise ValueError(
+            f"{d} already has {len(existing)} entries ({listed}). Edit them in the web app."
+        )
+    old = existing[0] if existing else None
+    if old and (why := rp.update_blocker(old, tz) or rp.unmanaged_data(c, old)):
+        raise ValueError(
+            f"Won't replace the entry on {d} ({rp.describe_entry(old, tz)}): {why}. "
+            "Edit it in the web app."
+        )
+    return old
+
+
 @hours_app.command("log")
 def hours_log(
     day: Annotated[str, typer.Argument(help="YYYY-MM-DD, 'today' or 'yesterday'.")],
@@ -225,18 +254,7 @@ def hours_log(
         d = rp.parse_date(day, rp.today_in(tz))
         t0, t1 = rp.parse_time(start), rp.parse_time(end)
         spans = [rp.parse_span(b) for b in breaks or []]
-        existing = rp.entries_on(c, d, tz)
-        if len(existing) > 1:
-            listed = "; ".join(rp.describe_entry(e, tz) for e in existing)
-            raise ValueError(
-                f"{d} already has {len(existing)} entries ({listed}). Edit them in the web app."
-            )
-        old = existing[0] if existing else None
-        if old and (why := rp.update_blocker(old)):
-            raise ValueError(
-                f"Won't replace the entry on {d} ({rp.describe_entry(old, tz)}): {why}. "
-                "Edit it in the web app."
-            )
+        old = _replaceable_entry(c, d, tz)
         break_type = rp.manual_break_type(c) if spans else None
         body = rp.build_time_entry(
             c.creds.role_id, d, t0, t1, spans, tz, break_type, old
@@ -258,6 +276,15 @@ def hours_log(
 
     if not _send_or_dry_run("POST", rp.TIME_ENTRY_PATH, body, yes):
         return
+    # The day may have changed since the preview (web app, another run): check again.
+    try:
+        now = _replaceable_entry(c, d, tz)
+    except ValueError as e:
+        _err(f"{e} Nothing sent.")
+    if now != old:
+        _err(
+            f"The entries on {d} changed since the preview. Nothing sent; run it again."
+        )
     res = _post_write(c, rp.TIME_ENTRY_PATH, body)
     event = (res if isinstance(res, dict) else {}).get("event") or {}
     entry_id = str(event.get("id", "?")).removeprefix("TimeEntry:")
@@ -436,18 +463,32 @@ def leave_balance(
 
 @leave_app.command("request")
 def leave_request(
-    start: Annotated[str, typer.Argument(help="First day off, YYYY-MM-DD or 'today'.")],
-    end: Annotated[str, typer.Argument(help="Last day off (inclusive), YYYY-MM-DD.")],
+    start: Annotated[
+        str, typer.Argument(help="First day off: YYYY-MM-DD, 'today' or 'yesterday'.")
+    ],
+    end: Annotated[
+        str,
+        typer.Argument(
+            help="Last day off, inclusive: YYYY-MM-DD, 'today' or 'yesterday'."
+        ),
+    ],
     reason: Annotated[
         str | None, typer.Option(help="Optional note for your approver.")
     ] = None,
+    policy_name: Annotated[
+        str,
+        typer.Option(
+            "--policy", help="Leave policy name, as `leave balance` shows it."
+        ),
+    ] = rp.ANNUAL_POLICY,
     yes: YES = False,
 ) -> None:
-    """Request vacation (Annual Leave Policy). Sending notifies your approver."""
+    """Request time off (vacation by default). Sending notifies your approver."""
     c = _client()
     try:
-        d0, d1 = rp.parse_date(start), rp.parse_date(end)
-        policy = rp.annual_policy(rp.pto_summary(c))
+        today = rp.today_in(rp.timezone(c))
+        d0, d1 = rp.parse_date(start, today), rp.parse_date(end, today)
+        policy = rp.leave_policy(rp.pto_summary(c), policy_name)
         body = rp.build_leave_request(
             c.creds.role_id, c.creds.company_id, policy["leavePolicyId"], d0, d1, reason
         )
@@ -598,6 +639,11 @@ def people_search(
 
 
 def main() -> None:
+    # Names and JSON can be non-ASCII; Windows pipes default to a legacy code page.
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", "") or "").lower()
+        if encoding not in ("utf-8", "utf8") and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     try:
         app()
     except auth.AuthError as e:

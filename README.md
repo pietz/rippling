@@ -11,7 +11,7 @@ uv tool install rippling
 ```
 
 `rippling login` opens Rippling in a Chromium-based browser you already have (Chrome, Edge,
-Brave, Chromium or Helium). Set `RIPPLING_BROWSER` to a browser executable to pick one.
+Brave, Vivaldi, Chromium or Helium). Set `RIPPLING_BROWSER` to a browser executable to pick one.
 
 ## Use
 
@@ -37,12 +37,16 @@ Every command explains itself with `--help`. Read commands take `--json` for scr
 
 **Writes are dry-run by default.** `hours log`, `leave request` and `leave cancel` print exactly
 what they would send and ask before sending. Without a terminal (scripts, agents) they stop
-after the dry-run; pass `--yes` to send.
+after the dry-run; pass `--yes` to send. A write is sent once and never retried; if the outcome
+is unclear (timeout, server error), the CLI says so: check before trying again.
 
 - `hours log` sets one day: it creates the entry or replaces that day's existing one completely
-  (times and breaks). It can't delete entries, and it refuses to replace entries with job codes.
-- `leave request` uses the Annual Leave Policy, end date inclusive, and runs Rippling's own
-  validation first. Sending notifies your approver.
+  (times and breaks), and checks the day again right before sending. It can't delete entries.
+  It refuses to touch what it can't carry over (several entries on the day, job codes,
+  attachments, comments, custom inputs, overnight shifts, locked entries) and days outside
+  Rippling's current pay periods.
+- `leave request` uses the Annual Leave Policy (`--policy` picks another), end date inclusive,
+  and runs Rippling's own validation first. Sending notifies your approver.
 
 **Status: early.** Reads and `hours log` are verified against the live API. `leave request`
 and `leave cancel` mirror what the web app's code sends but haven't been confirmed by a live

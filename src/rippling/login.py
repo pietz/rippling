@@ -19,13 +19,18 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
-from curl_cffi import CurlError
+from curl_cffi import CurlError, CurlOpt
 from curl_cffi.requests import WebSocket
 
 from .auth import Credentials, profile_dir
 
 APP_HOST = "app.rippling.com"
 APP_URL = f"https://{APP_HOST}/"
+
+# DevTools runs on localhost: never send it through an HTTP proxy from the environment.
+_LOCAL = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+CDP_TIMEOUT = 10  # seconds for one DevTools call, start to finish
+CLOSED_AFTER = 3  # polls in a row without any open tab: the window was closed
 
 READ_STORAGE_JS = """JSON.stringify({
   path: location.pathname,
@@ -106,10 +111,30 @@ class Browser:
         self.browser_ws = ""
 
     def start(self, url: str, timeout: float = 30) -> None:
-        self.profile.mkdir(parents=True, exist_ok=True)
+        self.profile.mkdir(mode=0o700, parents=True, exist_ok=True)
         port_file = self.profile / "DevToolsActivePort"
         port_file.unlink(missing_ok=True)
-        self.proc = subprocess.Popen(
+        try:
+            self.proc = self._launch(url)
+        except OSError as e:
+            raise LoginError(f"Couldn't start the browser {self.executable}: {e}")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.proc.poll() is not None:
+                raise LoginError(
+                    "The browser exited right away. If it's already open with the "
+                    "rippling profile, close that window and try again."
+                )
+            try:
+                port, path = port_file.read_text().split()[:2]
+                self.port, self.browser_ws = int(port), path
+                return
+            except (FileNotFoundError, ValueError):
+                time.sleep(0.2)
+        raise LoginError("The browser didn't open its DevTools port in time.")
+
+    def _launch(self, url: str) -> subprocess.Popen:
+        return subprocess.Popen(
             [
                 self.executable,
                 f"--user-data-dir={self.profile}",
@@ -127,44 +152,42 @@ class Browser:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self.proc.poll() is not None:
-                raise LoginError(
-                    "The browser exited right away. If it's already open with the "
-                    "rippling profile, close that window and try again."
-                )
-            try:
-                port, path = port_file.read_text().split()[:2]
-                self.port, self.browser_ws = int(port), path
-                return
-            except (FileNotFoundError, ValueError):
-                time.sleep(0.2)
-        raise LoginError("The browser didn't open its DevTools port in time.")
 
     @property
     def running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
     def _cdp(self, ws_url: str, method: str, params: dict | None = None) -> dict:
+        """One DevTools call; raises TimeoutError after CDP_TIMEOUT seconds overall."""
+        deadline = time.monotonic() + CDP_TIMEOUT
+
+        def left() -> float:
+            if (t := deadline - time.monotonic()) <= 0:
+                raise TimeoutError(f"DevTools {method} timed out")
+            return t
+
         ws = WebSocket()
-        ws.connect(ws_url, timeout=10)
+        ws.connect(ws_url, timeout=left(), curl_options={CurlOpt.NOPROXY: "*"})
         try:
-            ws.send_str(json.dumps({"id": 1, "method": method, "params": params or {}}))
+            msg = json.dumps({"id": 1, "method": method, "params": params or {}})
+            ws.send_str(msg, timeout=left())
             while True:
-                msg = json.loads(ws.recv_str(timeout=10))
-                if msg.get("id") == 1:
-                    return msg
+                reply = json.loads(ws.recv_str(timeout=left()))
+                if reply.get("id") == 1:
+                    return reply
         finally:
             ws.close()
 
-    def evaluate_on(self, host: str, expression: str) -> object:
-        """Evaluate JS in the first open tab whose host is exactly `host`; None if none."""
+    def pages(self) -> list[dict]:
+        """The browser's open tabs."""
         url = f"http://127.0.0.1:{self.port}/json/list"
-        with urllib.request.urlopen(url, timeout=5) as r:
-            targets = json.load(r)
-        for t in targets:
-            if t.get("type") == "page" and urlparse(t.get("url", "")).hostname == host:
+        with _LOCAL.open(url, timeout=5) as r:
+            return [t for t in json.load(r) if t.get("type") == "page"]
+
+    def evaluate_on(self, pages: list[dict], host: str, expression: str) -> object:
+        """Evaluate JS in the first of `pages` whose host is exactly `host`; else None."""
+        for t in pages:
+            if urlparse(t.get("url", "")).hostname == host:
                 msg = self._cdp(
                     t["webSocketDebuggerUrl"],
                     "Runtime.evaluate",
@@ -217,16 +240,23 @@ def wait_for_login(
     browser = Browser(find_browser(), profile_dir())
     started = time.monotonic()
     deadline = started + timeout
-    announced = False
+    announced, no_tabs = False, 0
+    closed = LoginError("The browser was closed before the login finished.")
     try:
         browser.start(APP_URL)
         while time.monotonic() < deadline:
             if not browser.running:
-                raise LoginError("The browser was closed before the login finished.")
+                raise closed
             try:
-                creds = _credentials(browser.evaluate_on(APP_HOST, READ_STORAGE_JS))
+                pages = browser.pages()
+                # macOS keeps the app running after its last window is closed.
+                no_tabs = 0 if pages else no_tabs + 1
+                raw = browser.evaluate_on(pages, APP_HOST, READ_STORAGE_JS)
+                creds = _credentials(raw)
             except CDP_ERRORS:
                 creds = None  # page mid-navigation or tab not ready; keep waiting
+            if no_tabs >= CLOSED_AFTER:
+                raise closed
             if creds and verify(creds):
                 return creds
             # Only ask for typing if the saved session didn't log us in right away.

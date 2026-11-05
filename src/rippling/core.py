@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from .api import Client
 
 ANNUAL_POLICY = "Annual Leave Policy"
+MAX_LEAVE_DAYS = 366
 INACTIVE_LEAVE = {"CANCELED", "CANCELLED", "REJECTED", "DECLINED", "DELETED"}
 
 TIME_ENTRY_PATH = "/time_products/twirp/time_products.shared.v1.TimesheetService/CreateOrUpdateTimeEntry"
@@ -110,7 +111,13 @@ class BreakType:
     paid: bool
 
 
-def update_blocker(entry: dict) -> str | None:
+def local_end_after(iso: str, day: date, tz: str) -> bool:
+    """Whether the instant `iso` lies after the end of local `day` (local midnight)."""
+    local = datetime.fromisoformat(iso).astimezone(ZoneInfo(tz)).replace(tzinfo=None)
+    return local > datetime.combine(day + timedelta(days=1), time())
+
+
+def update_blocker(entry: dict, tz: str) -> str | None:
     """Why an existing entry can't be safely replaced by a plain times+breaks entry."""
     details = entry.get("time_entry_event_details") or {}
     shifts = details.get("job_shifts") or []
@@ -118,8 +125,40 @@ def update_blocker(entry: dict) -> str | None:
         return "it has several job shifts"
     if any(s.get("job_codes") for s in shifts):
         return "it has job codes"
-    if not entry.get("can_mutate", True):
-        return "Rippling marks it as not editable"
+    if entry.get("can_mutate") is not True:
+        return "Rippling doesn't mark it as editable"
+    times = entry.get("event_times") or {}
+    start, end = times.get("start_time"), times.get("end_time")
+    if not start or not end:
+        return "it has no end time"
+    if local_end_after(end, local_date(start, tz), tz):
+        return "it runs past midnight"
+    return None
+
+
+# Entry data `hours log` can't carry over. The event list doesn't include it, so the
+# entry's detail record is checked before replacing.
+UNMANAGED_FIELDS = {
+    "attachments": "attachments",
+    "comments": "comments",
+    "photos": "photos",
+    "shiftInputValues": "custom shift inputs",
+    "shiftInputGroupValues": "custom shift inputs",
+    "missingBreakJustifications": "missing-break justifications",
+}
+
+
+def unmanaged_data(c: Client, entry: dict) -> str | None:
+    """Why replacing `entry` would drop data, or None. Fails closed on odd shapes."""
+    eid = str(entry["id"]).removeprefix("TimeEntry:")
+    record = c.get(f"/time_tracking/api/time_entries/{eid}/")
+    if not isinstance(record, dict):
+        return "its details couldn't be checked"
+    for key, label in UNMANAGED_FIELDS.items():
+        if key not in record:
+            return "its details couldn't be checked"
+        if record[key]:
+            return f"it has {label}"
     return None
 
 
@@ -221,10 +260,16 @@ def summary_id(c: Client, period_start: date) -> str | None:
     return data["ids"][0] if data["ids"] else None
 
 
-def time_entries(c: Client, start: date, end: date, tz: str) -> list[dict]:
+def time_entries(
+    c: Client,
+    start: date,
+    end: date,
+    tz: str,
+    periods: list[tuple[date, date]] | None = None,
+) -> list[dict]:
     """Time entries whose local start date lies in [start, end], oldest first."""
     found = []
-    for p0, p1 in pay_periods(c):
+    for p0, p1 in periods if periods is not None else pay_periods(c):
         if p1 < start or p0 > end:
             continue
         sid = summary_id(c, p0)
@@ -242,8 +287,29 @@ def time_entries(c: Client, start: date, end: date, tz: str) -> list[dict]:
 
 
 def entries_on(c: Client, day: date, tz: str) -> list[dict]:
-    """Existing time entries whose local start date is `day`."""
-    return time_entries(c, day, day, tz)
+    """Existing time entries whose local start date is `day`.
+
+    Raises ValueError when Rippling can't show that day (no pay period covers it) or
+    an entry from the day before runs into it: neither is safe to write next to.
+    """
+    periods = pay_periods(c)
+    if not any(p0 <= day <= p1 for p0, p1 in periods):
+        raise ValueError(
+            f"Rippling has no pay period covering {day} yet, so existing entries "
+            "can't be checked."
+        )
+    prev = day - timedelta(days=1)
+    found = time_entries(c, prev, day, tz, periods)
+    for e in found:
+        t = e["event_times"]
+        if local_date(t["start_time"], tz) == prev and local_end_after(
+            t.get("end_time") or t["start_time"], prev, tz
+        ):
+            raise ValueError(
+                f"An entry from {prev} runs into {day} ({describe_entry(e, tz)}). "
+                "Edit it in the web app."
+            )
+    return [e for e in found if local_date(e["event_times"]["start_time"], tz) == day]
 
 
 def manual_break_type(c: Client) -> BreakType:
@@ -389,12 +455,14 @@ def pto_summary(c: Client) -> list[dict]:
     )["pto_summary"]
 
 
-def annual_policy(summary: list[dict]) -> dict:
+def leave_policy(summary: list[dict], name: str = ANNUAL_POLICY) -> dict:
+    """The leave policy whose display name is `name` (case and spacing ignored)."""
+    want = " ".join(name.split()).casefold()
     for p in summary:
-        if p["policyDisplayName"] == ANNUAL_POLICY:
+        if " ".join(p["policyDisplayName"].split()).casefold() == want:
             return p
-    names = ", ".join(p["policyDisplayName"] for p in summary)
-    raise ValueError(f"No {ANNUAL_POLICY!r} found. Policies: {names}.")
+    names = ", ".join(repr(p["policyDisplayName"].strip()) for p in summary)
+    raise ValueError(f"No leave policy named {name!r}. Yours: {names}. Use --policy.")
 
 
 def build_leave_request(
@@ -407,6 +475,8 @@ def build_leave_request(
 ) -> dict:
     if end < start:
         raise ValueError("End date must not be before start date.")
+    if (end - start).days >= MAX_LEAVE_DAYS:
+        raise ValueError(f"That's more than {MAX_LEAVE_DAYS} days; check the dates.")
     body = {
         "role": role_id,
         "company": company_id,

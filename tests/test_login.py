@@ -77,3 +77,26 @@ def test_close_escalates_and_never_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(b, "_cdp", lambda *a, **k: {})  # Browser.close "succeeds"...
     b.close()  # ...but the process hangs; must terminate without raising
     assert b.proc.calls == ["terminate"] and not b.running
+
+
+def test_bad_browser_path_is_a_login_error(tmp_path):
+    b = login.Browser(str(tmp_path / "no-such-browser"), tmp_path / "profile")
+    with pytest.raises(login.LoginError, match="Couldn't start the browser"):
+        b.start("https://example.com")
+
+
+def test_closed_window_ends_the_wait(monkeypatch):
+    class NoTabs(login.Browser):
+        def start(self, url, timeout=30):
+            self.proc = StuckProc()  # still running, like macOS after the last window
+
+        def pages(self):
+            return []
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(login, "Browser", NoTabs)
+    monkeypatch.setattr(login, "find_browser", lambda: "/bin/browser")
+    with pytest.raises(login.LoginError, match="closed"):
+        login.wait_for_login(lambda c: True, timeout=5, poll=0)

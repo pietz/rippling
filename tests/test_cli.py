@@ -36,6 +36,8 @@ def fake(monkeypatch):
     monkeypatch.setattr(cli, "_client", lambda: client)
     monkeypatch.setattr(rp, "timezone", lambda c: "Europe/Berlin")
     monkeypatch.setattr(rp, "entries_on", lambda c, d, tz: [])
+    monkeypatch.setattr(rp, "unmanaged_data", lambda c, e: None)
+    monkeypatch.setattr(rp, "today_in", lambda tz: date(2026, 11, 4))
     monkeypatch.setattr(
         rp, "manual_break_type", lambda c: rp.BreakType("bt", "Lunch Break", False)
     )
@@ -107,6 +109,7 @@ def test_refuses_to_replace_entry_with_job_codes(fake, monkeypatch):
             "start_time": "2026-11-04T08:00:00Z",
             "end_time": "2026-11-04T17:00:00Z",
         },
+        "can_mutate": True,
         "time_entry_event_details": {"job_shifts": [{"job_codes": [{"id": "j"}]}]},
     }
     monkeypatch.setattr(rp, "entries_on", lambda c, d, tz: [entry])
@@ -122,6 +125,7 @@ def _entry(eid, **extra):
             "start_time": "2026-11-04T08:00:00Z",
             "end_time": "2026-11-04T17:00:00Z",
         },
+        "can_mutate": True,
         "time_entry_event_details": {"job_shifts": [{}]},
         **extra,
     }
@@ -139,7 +143,7 @@ def test_replaces_the_single_existing_entry(fake, monkeypatch):
     "entries, message",
     [
         ([_entry("e1"), _entry("e2")], "already has 2 entries"),
-        ([_entry("e1", can_mutate=False)], "not editable"),
+        ([_entry("e1", can_mutate=False)], "editable"),
     ],
 )
 def test_refuses_ambiguous_or_locked_days(fake, monkeypatch, entries, message):
@@ -225,3 +229,50 @@ def test_people_search_needs_a_query(fake):
     assert CliRunner().invoke(cli.app, ["people", "search"]).exit_code != 0
     out = CliRunner().invoke(cli.app, ["people", "search", "  "])
     assert out.exit_code != 0 and "at least one word" in out.output
+
+
+@pytest.mark.parametrize("args", [HOURS, VACATION])
+@pytest.mark.parametrize("answer, sends", [("n\n", 0), ("y\n", 1), ("", 0)])
+def test_interactive_confirm(fake, monkeypatch, args, answer, sends):
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    result = CliRunner().invoke(cli.app, args, input=answer)
+    assert len(fake.sent) == sends, result.output
+
+
+@pytest.mark.parametrize(
+    "status, message", [(500, "may or may not have been saved"), (400, "rejected")]
+)
+def test_server_errors_are_an_unknown_outcome(fake, monkeypatch, status, message):
+    from rippling.api import ApiError
+
+    def fail(path, body):
+        raise ApiError(status, "{}", path)
+
+    monkeypatch.setattr(fake, "post", fail)
+    result = CliRunner().invoke(cli.app, [*HOURS, "--yes"])
+    assert result.exit_code == 1 and message in result.output
+
+
+def test_hours_log_rechecks_the_day_before_sending(fake, monkeypatch):
+    days = iter([[], [_entry("web")]])  # an entry appears after the preview
+    monkeypatch.setattr(rp, "entries_on", lambda c, d, tz: next(days))
+    result = CliRunner().invoke(cli.app, [*HOURS, "--yes"])
+    assert result.exit_code == 1 and "changed since the preview" in result.output
+    assert fake.sent == []
+
+
+def test_hours_log_refuses_entries_with_unmanaged_data(fake, monkeypatch):
+    monkeypatch.setattr(rp, "entries_on", lambda c, d, tz: [_entry("e1")])
+    monkeypatch.setattr(rp, "unmanaged_data", lambda c, e: "it has attachments")
+    result = CliRunner().invoke(cli.app, [*HOURS, "--yes"])
+    assert result.exit_code == 1 and "attachments" in result.output
+    assert fake.sent == []
+
+
+def test_leave_today_is_the_rippling_timezone_date(fake, monkeypatch):
+    monkeypatch.setattr(rp, "today_in", lambda tz: date(2026, 12, 21))
+    result = CliRunner().invoke(
+        cli.app, ["leave", "request", "today", "today", "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    assert fake.sent[0][1]["startDate"] == "2026-12-21"

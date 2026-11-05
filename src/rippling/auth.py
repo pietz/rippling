@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -54,12 +55,19 @@ def clear() -> list[Path]:
 
 def save(creds: Credentials) -> Path:
     path = credentials_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Create with 0600 from the start so the token is never world-readable.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(asdict(creds), f, indent=2)
-    os.chmod(path, 0o600)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    # A new private (0600) file, swapped in at once: the token is never readable by
+    # others, even if an old file had looser permissions, and a crash can't leave
+    # a half-written file behind.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".credentials-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(asdict(creds), f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
     return path
 
 
@@ -67,8 +75,11 @@ def load() -> Credentials:
     path = credentials_path()
     if not path.exists():
         raise AuthError("Not logged in. Run `rippling login`.")
-    data = json.loads(path.read_text())
-    creds = Credentials(**{k: data[k] for k in Credentials.__dataclass_fields__})
+    try:
+        data = json.loads(path.read_text())
+        creds = Credentials(**{k: data[k] for k in Credentials.__dataclass_fields__})
+    except (ValueError, KeyError, TypeError):
+        raise AuthError(f"Can't read {path}. Run `rippling login`.") from None
     if creds.expired:
         raise AuthError("Rippling token expired. Run `rippling login`.")
     return creds

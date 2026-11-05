@@ -9,7 +9,7 @@ Run `rippling --help` and `rippling <group> --help`; the CLI documents itself. N
 
 ## Writes need the user's yes
 
-`hours log`, `leave request` and `leave cancel` are dry-runs unless `--yes` is passed: run without it, show the user the summary, and only after they approve that exact action, re-run the same command with `--yes`. Never send test entries. Leave requests notify the approver.
+`hours log`, `leave request` and `leave cancel` print a preview and send nothing without `--yes` (in an interactive terminal they ask instead; never answer that prompt yourself). Run without `--yes`, show the user the summary, and only after they approve that exact action, re-run the same command with `--yes`. Never send test entries. Leave requests notify the approver.
 
 ## Common patterns
 
@@ -23,6 +23,7 @@ rippling people search "jane engineering" --json
 
 ## Gotchas
 
-- `hours log` replaces that day's existing entry completely; check `hours week` first.
-- Dates `YYYY-MM-DD` (`today`/`yesterday` for hours), local 24h times; prefer `--json` when parsing.
+- `hours log` replaces that day's existing entry completely; check `hours week` first. It refuses days it can't replace safely (several entries, attachments, comments, overnight shifts): the user edits those in the web app.
+- Dates `YYYY-MM-DD`, `today` or `yesterday`; local 24h times; prefer `--json` when parsing.
+- `leave request` uses the "Annual Leave Policy"; other policies via `--policy "<name from leave balance>"`.
 - "Run `rippling login`" means the ~30-day token expired. Login opens a browser where the user types password and 2FA themselves: ask them to run it.
